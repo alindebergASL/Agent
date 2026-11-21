@@ -1,0 +1,2 @@
+supplier,quote_id,part_number,unit_price_usd,freight_usd,freight_basis
+Supplier A,A-01,00427,100.00,30.00,per shipment
