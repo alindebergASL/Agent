@@ -1,0 +1,21 @@
+# Optional offline provider for the documented quote demonstration.
+services:
+  app:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    environment:
+      OPENAI_API_KEY: offline-test-double
+      OPENAI_BASE_URL: http://fixture:8765/v1
+      NO_PROXY: fixture,localhost,127.0.0.1
+      no_proxy: fixture,localhost,127.0.0.1
+    depends_on:
+      fixture:
+        condition: service_healthy
+  fixture:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    pull_policy: never
+    command: ["python", "tests/quote_fixture.py", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8765), 1).close()"]
+      interval: 1s
+      timeout: 2s
+      retries: 15

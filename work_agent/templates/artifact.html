@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('assignment', task_id=task_id) }}">← Assignment</a>
+<section class="panel">
+  <div class="heading">
+    <h1>{{ name }}</h1>
+    <a class="download" href="?download=1">Download</a>
+  </div>
+  <pre>{{ content }}</pre>
+</section>
+{% endblock %}

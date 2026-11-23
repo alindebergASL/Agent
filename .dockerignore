@@ -1,0 +1,12 @@
+*
+!requirements.txt
+!work_agent/
+!work_agent/**/
+!work_agent/**/*.py
+!work_agent/**/*.html
+!work_agent/**/*.css
+!work_agent/**/*.js
+!tests/
+!tests/**/
+!tests/**/*.py
+**/__pycache__/
