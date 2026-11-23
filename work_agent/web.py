@@ -55,7 +55,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
     if model is None and os.environ.get("OPENAI_API_KEY"):
         model = OpenAIModel(
             os.environ["OPENAI_API_KEY"],
-            os.environ.get("OPENAI_MODEL") or "gpt-4.1-mini",
+            os.environ.get("OPENAI_MODEL") or "gpt-6.2-sol",
             base_url=os.environ.get("OPENAI_BASE_URL") or None,
         )
 

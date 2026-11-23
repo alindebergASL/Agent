@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
@@ -18,7 +19,7 @@ class InventoryModel:
     def respond(self, input, tools, instructions):
         outputs = tool_outputs(input)
         if "write" in outputs:
-            if outputs["write"] != {"staged": "inventory.md"}:
+            if outputs["write"].get("staged") != "inventory.md":
                 raise ValueError("The inventory summary was not staged.")
             output = [answer("Saved the inventory summary.")]
         elif "count" in outputs:
@@ -41,7 +42,7 @@ class FailingModel:
     def respond(self, input, tools, instructions):
         outputs = tool_outputs(input)
         if outputs:
-            if outputs["write"] != {"staged": "partial.md"}:
+            if outputs["write"].get("staged") != "partial.md":
                 raise ValueError("The draft was not staged.")
             raise AssignmentError("The fixture stopped before publication.")
         return {"status": "completed", "output": [call(
@@ -110,6 +111,41 @@ class WebTests(unittest.TestCase):
             self.assertNotIn("partial.md", page)
             artifact = client.get(f"{location}/artifacts/partial.md?download=1")
             self.assertEqual(artifact.status_code, 404)
+
+    def test_staging_feedback_and_requested_output_combinations(self):
+        table = ("stock.csv", "count\n21\n")
+        note = ("restocking.md", "# Restocking\n\n21 left. Reorder below 12.\n")
+        cases = [
+            ("Give me a CSV and a restocking recommendation.", [table, note]),
+            ("Give me only a CSV.", [table]),
+            ("Answer in chat only.", []),
+        ]
+        for request, files in cases:
+            with self.subTest(request=request):
+                model = Mock()
+                responses = [
+                    {"status": "completed", "output": [
+                        call(name, "write_artifact", name=name, content=content)
+                    ]}
+                    for name, content in files
+                ]
+                responses.append({"status": "completed", "output": [answer("There are 21 units.")]})
+                model.respond.side_effect = responses
+                with self.client(model) as client:
+                    response = client.post("/tasks", data={"request": request}, follow_redirects=False)
+                    self.assertEqual(response.status_code, 303)
+                    location = response.headers["location"]
+                    page = self.wait_for_task(client, location, "completed")
+                    self.assertIn("There are 21 units.", page)
+                    task = Store(self.data_dir).get_task(location.rsplit("/", 1)[1])
+                    self.assertEqual(task["artifacts"], sorted(name for name, _ in files))
+                    receipts = tool_outputs(model.respond.call_args.args[0])
+                    for name, content in files:
+                        self.assertEqual(receipts[name]["staged"], name)
+                        self.assertIn("remaining files", receipts[name]["next_step"])
+                        saved = client.get(f"{location}/artifacts/{name}?download=1")
+                        self.assertEqual(saved.status_code, 200)
+                        self.assertEqual(saved.text, content)
 
     def test_binary_upload_is_rejected(self):
         with self.client(InventoryModel()) as client:

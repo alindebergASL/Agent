@@ -13,7 +13,7 @@ export OPENAI_API_KEY
 docker compose up --build -d
 ```
 
-Open `http://127.0.0.1:8000`. Set `OPENAI_MODEL` before starting Compose to choose a different Responses model. The default is `gpt-4.1-mini`. Set `WORK_AGENT_PORT` to change the local port. `OPENAI_BASE_URL` is optional and can point the app to a local Responses test double.
+Open `http://127.0.0.1:8000`. The app uses `gpt-6.2-sol` by default. To use Terra, run `OPENAI_MODEL=gpt-6.1-terra docker compose up --build -d`. Set `WORK_AGENT_PORT` to change the local port. `OPENAI_BASE_URL` is optional and can point the app to a local Responses test double.
 
 ## Run offline tests
 

@@ -18,9 +18,14 @@ INSTRUCTIONS = (
     "Use read_file to inspect the sources and calculate for arithmetic. "
     "Cite filenames and 1-based line numbers for source facts, and distinguish "
     "facts from assumptions. Preserve identifiers such as part numbers as text. "
-    "Use write_artifact for any requested CSV or Markdown files. Review your results "
-    "before returning a concise summary. Ask for missing information if it is needed "
-    "to finish instead of inventing facts."
+    "Explain calculated changes using the terms that vary and any terms that stay "
+    "fixed. Check claims about the totals against the full calculation. "
+    "Use write_artifact for requested files, choosing a descriptive filename when "
+    "none is supplied. If the user requests a file and a written deliverable such "
+    "as a recommendation or brief, save the full written deliverable in its own "
+    "Markdown file. Honor requests to combine outputs or give the prose inline. "
+    "Review the results before returning a concise summary. Ask for missing "
+    "information if it is needed to finish instead of inventing facts."
 )
 
 
@@ -181,7 +186,11 @@ def _dispatch(call: dict, uploads: Mapping[str, str], stage: Callable[[str, str]
             if not isinstance(filename, str) or not isinstance(content, str):
                 raise ValueError("Artifact name and content must be text.")
             stage(filename, content)
-            return {"staged": filename}
+            return {
+                "staged": filename,
+                "next_step": "Check which requested deliverables are still missing. "
+                "Stage any remaining files before replying.",
+            }
     except ValueError as exc:
         return {"error": str(exc)}
     return {"error": "Use an available tool and pass its required parameters."}
