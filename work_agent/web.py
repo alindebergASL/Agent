@@ -9,7 +9,7 @@ from threading import Event, Thread
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
@@ -41,6 +41,7 @@ def work_pending(store, model, wake, stop):
                 store.read_uploads(task_id),
                 lambda name, content: store.stage(task_id, name, content),
                 lambda message: store.progress(task_id, message),
+                lambda step: store.record_step(task_id, step),
             )
             store.complete(task_id, response)
         except AssignmentError as exc:
@@ -156,6 +157,13 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
         if task is None:
             raise HTTPException(404, "Assignment not found.")
         return templates.TemplateResponse(request=request, name="task.html", context={"task": task})
+
+    @app.get("/tasks/{task_id}/history")
+    def run_history(task_id: str):
+        history = store.run_history(task_id)
+        if history is None:
+            raise HTTPException(404, "Assignment not found.")
+        return JSONResponse(history, headers={"Cache-Control": "no-store"})
 
     @app.get("/tasks/{task_id}/artifacts/{name}")
     def artifact(request: Request, task_id: str, name: str, download: bool = False):

@@ -2,6 +2,8 @@
 
 Work Agent accepts a request and uploaded text files, runs a background assignment, and saves the resulting CSV and Markdown files for you to reopen.
 
+The app can batch independent file reads in an OpenAI-hosted program and still use direct calls for individual operations. Both paths use the same file reader. Calculations and artifact writes use direct calls. For public research, the hosted web tool can search and open source pages. Ask for a saved brief with links to the pages that support its claims.
+
 ## Start the app
 
 Run from the checkout with Docker and Docker Compose. In Bash, enter your development API key when prompted. Compose supplies the key to the running service.
@@ -32,6 +34,8 @@ docker compose up -d --force-recreate app
 ```
 
 Compose mounts the `agent-data` volume at `/data` for the assignment database, inputs, and outputs. Keep the volume when recreating the container or updating the app.
+
+Open **Run history (JSON)** from a task's Activity section to inspect its saved Responses items and tool receipts. Hosted calls share a program ID, and Activity shows the file and line range each program read. The history can include uploaded text returned by a tool, so review it before sharing.
 
 The quote demonstration can also run against the offline Responses fixture. Use a separate Compose project so its saved assignments and model configuration stay separate from live runs.
 

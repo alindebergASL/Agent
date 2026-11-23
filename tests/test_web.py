@@ -88,6 +88,13 @@ class WebTests(unittest.TestCase):
             self.assertEqual(
                 saved.content, "# Inventory\n\n21 units in stock. Source: batches.txt:1–2.\n".encode(),
             )
+            history = client.get(f"{location}/history")
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.json()["status"], "completed")
+            self.assertEqual(history.json()["uploads"], ["batches.txt"])
+            self.assertEqual(
+                tool_outputs(history.json()["steps"])["count"], {"result": "21"},
+            )
 
         task_id = location.rsplit("/", 1)[1]
         self.assertEqual(Store(self.data_dir).read_upload(task_id, "batches.txt"), b"3\r\n7\r\n")
@@ -102,6 +109,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(preview.status_code, 200)
             self.assertIn(location, preview.text)
             self.assertIn("21 units in stock.", preview.text)
+            self.assertEqual(client.get(f"{location}/history").json(), history.json())
 
     def test_failed_assignment_does_not_publish_staged_artifact(self):
         with self.client(FailingModel()) as client:
