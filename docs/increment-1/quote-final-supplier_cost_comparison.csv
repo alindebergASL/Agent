@@ -1,0 +1,5 @@
+supplier,quote_id,part_number,units,shipments,orders,unit_price_usd,quoted_freight_usd,freight_basis,merchandise_usd,total_freight_usd,delivered_total_usd,unit_price_source,freight_source
+Supplier A,A-01,"00427",10,2,1,100.00,30.00,per shipment,1000.00,60.00,1060.00,supplier-a.csv:2,supplier-a.csv:2
+Supplier B,B-01,"00427",10,2,1,103.00,20.00,per order,1030.00,20.00,1050.00,supplier-b.csv:2,supplier-b.csv:2
+Supplier A,A-01,"00427",10,1,1,100.00,30.00,per shipment,1000.00,30.00,1030.00,supplier-a.csv:2,supplier-a.csv:2
+Supplier B,B-01,"00427",10,1,1,103.00,20.00,per order,1030.00,20.00,1050.00,supplier-b.csv:2,supplier-b.csv:2
