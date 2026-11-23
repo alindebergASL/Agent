@@ -1,0 +1,40 @@
+:root {
+  color-scheme: light;
+  --ink: #232820;
+  --soft: #555e52;
+  --line: #d8ded2;
+  --paper: #f2f4ed;
+  --surface: #fff;
+  --accent: #305641;
+  font: 16px/1.55 system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); }
+.site-header { border-bottom: 1px solid var(--line); padding: 1rem max(1.25rem, calc((100% - 48rem) / 2)); }
+.site-name { color: var(--ink); font-weight: 750; text-decoration: none; }
+main { width: min(48rem, calc(100% - 2rem)); margin: 2rem auto 4rem; }
+.panel { padding: clamp(1rem, 4vw, 2rem); border: 1px solid var(--line); border-radius: .75rem; background: var(--surface); margin-bottom: 1rem; }
+h1, h2 { line-height: 1.2; margin: 0 0 .9rem; overflow-wrap: anywhere; }
+h1 { font-size: 1.65rem; }
+h2 { font-size: 1.1rem; }
+label { display: block; font-weight: 650; }
+textarea { display: block; width: 100%; resize: vertical; border: 1px solid #9ca896; border-radius: .4rem; padding: .75rem; font: inherit; margin: .35rem 0 1.15rem; }
+input[type=file] { display: block; max-width: 100%; font: inherit; margin: .3rem 0 1.25rem; }
+button, .download { font: inherit; font-weight: 600; padding: .45rem 1rem; border-radius: .4rem; }
+button { color: white; background: var(--accent); border: 1px solid var(--accent); cursor: pointer; }
+button:disabled { opacity: .55; cursor: default; }
+a { color: var(--accent); text-underline-offset: .18em; }
+.download { border: 1px solid var(--line); }
+.help { margin: .15rem 0; color: var(--soft); font-size: .9rem; }
+.notice { background: #fff4da; padding: .6rem .8rem; border-radius: .4rem; }
+.heading, .entries li { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
+.entries { list-style: none; padding: 0; margin: 0; }
+.entries li { border-top: 1px solid var(--line); padding: .5rem 0; overflow-wrap: anywhere; }
+.status { background: #e7edf4; color: #30465c; padding: .15rem .55rem; border-radius: .35rem; font-size: .85rem; }
+.status[data-state=completed] { background: #e4efe4; color: #2e5137; }
+.status[data-state=failed], .status[data-state=interrupted] { background: #f9eadf; color: #743c25; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.back { display: inline-block; margin: 0 0 .8rem; }
+pre { margin-bottom: 0; padding: .9rem; background: var(--paper); border-radius: .4rem; overflow: auto; font: .9rem/1.55 ui-monospace, monospace; }
+li + li { margin-top: .2rem; }

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="panel">
+  <h1>New assignment</h1>
+  {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+  {% if not enabled %}<p class="notice">Set <code>OPENAI_API_KEY</code> and restart the app to submit assignments.</p>{% endif %}
+  <form action="{{ url_for('submit') }}" method="post" enctype="multipart/form-data">
+    <label for="request">What would you like done?</label>
+    <textarea id="request" name="request" rows="6" maxlength="8000" required>{{ draft }}</textarea>
+    <label for="files">Supporting files</label>
+    <p class="help" id="file-help">Up to 8 UTF-8 text files, 128 KiB each.</p>
+    <input id="files" name="files" type="file" multiple aria-describedby="file-help">
+    <button type="submit"{% if not enabled %} disabled{% endif %}>Start assignment</button>
+  </form>
+</section>
+{% if tasks %}
+<section class="panel">
+  <h2>Assignments</h2>
+  <ul class="entries">
+    {% for task in tasks %}
+    <li><a href="{{ url_for('assignment', task_id=task.id) }}">{{ task.request | truncate(100) }}</a>
+      <span class="status" data-state="{{ task.status }}">{{ task.status | capitalize }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

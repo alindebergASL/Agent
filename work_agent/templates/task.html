@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Assignment · Work Agent{% endblock %}
+{% block head %}
+{% if task.status in ("queued", "running") %}<meta http-equiv="refresh" content="2">{% endif %}
+{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('index') }}">← Assignments</a>
+<section class="panel">
+  <div class="heading">
+    <h1>Assignment</h1>
+    <span class="status" data-state="{{ task.status }}" data-task-status="{{ task.status }}">{{ task.status | capitalize }}</span>
+  </div>
+  <p class="prose">{{ task.request }}</p>
+  {% if task.uploads %}
+  <h2>Uploaded files</h2>
+  <ul>{% for name in task.uploads %}<li>{{ name }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if task.error %}<p class="notice" role="alert">{{ task.error }}</p>{% endif %}
+  {% if task.response %}
+  <h2>Result</h2>
+  <p class="prose">{{ task.response }}</p>
+  {% endif %}
+  {% if task.artifacts %}
+  <h2>Saved files</h2>
+  <ul class="entries">
+    {% for name in task.artifacts %}
+    <li><a href="{{ url_for('artifact', task_id=task.id, name=name) }}">{{ name }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% if task.events %}
+<section class="panel">
+  <h2>Activity</h2>
+  <ol>{% for event in task.events %}<li>{{ event }}</li>{% endfor %}</ol>
+</section>
+{% endif %}
+{% endblock %}
