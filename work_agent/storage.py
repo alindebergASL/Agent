@@ -82,6 +82,13 @@ CREATE TABLE IF NOT EXISTS staged_artifacts (
     content BLOB NOT NULL,
     PRIMARY KEY (turn_id, name)
 );
+CREATE TABLE IF NOT EXISTS staged_methods (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id),
+    title TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    procedure TEXT NOT NULL,
+    evidence TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS saved_methods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -148,12 +155,10 @@ class Store:
                 "UPDATE tasks SET status = 'interrupted', error = ? WHERE status = 'running'",
                 (INTERRUPTED,),
             )
-            connection.execute(
-                """
-                DELETE FROM staged_artifacts
-                WHERE turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')
-                """
-            )
+            for table in ("staged_artifacts", "staged_methods"):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')"
+                )
             if version < SCHEMA_VERSION:
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise RuntimeError("Assignment database migration found a broken reference.")
@@ -340,7 +345,7 @@ class Store:
                 raise ValueError("Only a queued or running turn can be stopped.")
             connection.execute("UPDATE turns SET status = 'stopped' WHERE id = ?", (turn["id"],))
             connection.execute("UPDATE tasks SET status = 'stopped' WHERE id = ?", (task_id,))
-            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn["id"],))
+            self._discard_drafts(connection, turn["id"])
 
     def correct_turn(self, task_id: str, expected_turn_id: int, request: str) -> int:
         with self._connection() as connection:
@@ -352,7 +357,7 @@ class Store:
             if not request:
                 raise ValueError("Enter a correction.")
             connection.execute("UPDATE turns SET status = 'superseded' WHERE id = ?", (turn["id"],))
-            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn["id"],))
+            self._discard_drafts(connection, turn["id"])
             return self._queue_turn(connection, task_id, request, "correction")
 
     def continue_turn(self, task_id: str, expected_turn_id: int) -> int:
@@ -487,6 +492,26 @@ class Store:
                 (active, name, data),
             )
 
+    def stage_method(
+        self, task_id: str, title: str, scope: str, procedure: str, evidence: str, *, turn_id: int,
+    ) -> None:
+        values = self._method_values(title, scope, procedure, evidence)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = self._running_turn(connection, task_id, turn_id)
+            connection.execute(
+                """
+                INSERT INTO staged_methods (turn_id, title, scope, procedure, evidence) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(turn_id) DO UPDATE SET title = excluded.title, scope = excluded.scope,
+                    procedure = excluded.procedure, evidence = excluded.evidence
+                """,
+                (active, *values),
+            )
+
+    def _discard_drafts(self, connection: sqlite3.Connection, turn_id: int) -> None:
+        connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn_id,))
+        connection.execute("DELETE FROM staged_methods WHERE turn_id = ?", (turn_id,))
+
     def progress(self, task_id: str, message: str, *, turn_id: int | None = None) -> None:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -555,7 +580,14 @@ class Store:
                 """,
                 ((task_id, draft["name"], draft["current"] + 1, draft["content"], active) for draft in drafts),
             )
-            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (active,))
+            connection.execute(
+                """
+                INSERT INTO saved_methods (source_task_id, title, scope, procedure, evidence, updated_at)
+                SELECT ?, title, scope, procedure, evidence, ? FROM staged_methods WHERE turn_id = ?
+                """,
+                (task_id, self._method_timestamp(), active),
+            )
+            self._discard_drafts(connection, active)
             connection.execute(
                 "UPDATE turns SET status = 'completed', response = ? WHERE id = ?", (response, active)
             )
@@ -570,7 +602,7 @@ class Store:
                 active = self._running_turn(connection, task_id, turn_id)
             except InactiveTurn:
                 return
-            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (active,))
+            self._discard_drafts(connection, active)
             connection.execute("UPDATE turns SET status = 'failed', error = ? WHERE id = ?", (message, active))
             connection.execute("UPDATE tasks SET status = 'failed', error = ? WHERE id = ?", (message, task_id))
 
@@ -646,7 +678,10 @@ class Store:
             if not text or len(text) > limit or "\x00" in text:
                 raise ValueError(f"Enter valid {name} text of up to {limit:,} characters.")
             fields.append(text)
-        return (*fields, datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+        return tuple(fields)
+
+    def _method_timestamp(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
     def save_method(self, source_task_id: str, title: str, scope: str, procedure: str, evidence: str) -> int:
         with self._connection() as connection:
@@ -662,7 +697,7 @@ class Store:
                 INSERT INTO saved_methods (source_task_id, title, scope, procedure, evidence, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?) RETURNING id
                 """,
-                (source_task_id, *values),
+                (source_task_id, *values, self._method_timestamp()),
             ).fetchone()["id"]
 
     def list_methods(self, *, limit: int | None = None) -> list[dict]:
@@ -700,7 +735,7 @@ class Store:
                     revision = revision + 1
                 WHERE id = ?
                 """,
-                (*values, method_id),
+                (*values, self._method_timestamp(), method_id),
             )
 
     def remove_method(self, method_id: int, *, expected_revision: int) -> None:
