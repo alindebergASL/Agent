@@ -1,9 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Assignment · Work Agent{% endblock %}
 {% block head %}
-{% if task.status in ("queued", "running") and not form_error %}<meta http-equiv="refresh" content="2">{% endif %}
+{% if task.status in ("queued", "running") and not form_error and not control_error %}
+<script>
+  window.setInterval(() => {
+    const controls = document.getElementById("turn-controls");
+    const correction = document.getElementById("correction");
+    if (!controls?.contains(document.activeElement) && !correction?.value) {
+      window.location.reload();
+    }
+  }, 2000);
+</script>
+<noscript><meta http-equiv="refresh" content="2"></noscript>
+{% endif %}
 {% endblock %}
 {% block body %}
+{% set displayed_turn = task.turns | last %}
 <a class="back" href="{{ url_for('index') }}">← Assignments</a>
 <section class="panel">
   <div class="heading">
@@ -11,8 +23,11 @@
     <span class="status" data-state="{{ task.status }}" data-task-status="{{ task.status }}">{{ task.status | capitalize }}</span>
   </div>
   {% for turn in task.turns %}
-  <div class="turn" data-turn-id="{{ turn.id }}">
-    <h2>{% if loop.first %}Original request{% else %}Follow-up {{ loop.index0 }}{% endif %}</h2>
+  <div class="turn" data-turn-id="{{ turn.id }}" data-turn-status="{{ turn.status }}" data-turn-kind="{{ turn.kind }}">
+    <div class="heading">
+      <h2>{{ {"initial": "Original request", "follow-up": "Follow-up", "correction": "Correction", "continuation": "Continuation"}.get(turn.kind, "Request") }}</h2>
+      {% if not loop.last %}<span class="status" data-state="{{ turn.status }}">{{ turn.status | capitalize }}</span>{% endif %}
+    </div>
     <p class="prose">{{ turn.request }}</p>
     {% if turn.error %}<p class="notice"{% if loop.last %} role="alert"{% endif %}>{{ turn.error }}</p>{% endif %}
     {% if turn.response %}
@@ -38,6 +53,32 @@
   </ul>
   {% endif %}
 </section>
+{% if task.status in ("queued", "running", "interrupted") or control_error %}
+<section id="turn-controls" class="panel">
+  <h2>Turn controls</h2>
+  {% if control_error %}<p class="notice" role="alert">{{ control_error }}</p>{% endif %}
+  {% if task.status in ("queued", "running") %}
+  <form action="{{ url_for('stop_turn', task_id=task.id) }}" method="post">
+    <input type="hidden" name="turn_id" value="{{ displayed_turn.id }}">
+    <button type="submit">Stop</button>
+  </form>
+  {% endif %}
+  {% if task.status == "running" or correction_draft %}
+  <form action="{{ url_for('correct_turn', task_id=task.id) }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="turn_id" value="{{ displayed_turn.id }}">
+    <label for="correction">Correction</label>
+    <textarea id="correction" name="request" rows="4" maxlength="8000" required>{{ correction_draft }}</textarea>
+    <button type="submit"{% if not follow_up_enabled or task.status != "running" %} disabled{% endif %}>Send correction</button>
+  </form>
+  {% endif %}
+  {% if task.status == "interrupted" %}
+  <form action="{{ url_for('continue_turn', task_id=task.id) }}" method="post">
+    <input type="hidden" name="turn_id" value="{{ displayed_turn.id }}">
+    <button type="submit"{% if not follow_up_enabled %} disabled{% endif %}>Continue</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
 {% if task.can_follow_up or draft or form_error %}
 <section class="panel">
   <h2>Continue assignment</h2>

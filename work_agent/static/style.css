@@ -40,6 +40,7 @@ pre { margin-bottom: 0; padding: .9rem; background: var(--paper); border-radius:
 li + li { margin-top: .2rem; }
 .turn { margin: 1rem 0; }
 .turn + .turn { border-top: 1px solid var(--line); padding-top: 1rem; }
+#turn-controls form + form { margin-top: 1rem; }
 .source-lines { list-style: none; padding: .75rem 0; background: var(--paper); overflow-x: auto; }
 .source-lines li { display: grid; grid-template-columns: 7ch minmax(max-content, 1fr); gap: .75rem; margin: 0; padding-inline: .75rem; }
 .source-lines li:target { background: #e0e9df; }

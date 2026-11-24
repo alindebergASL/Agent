@@ -1,9 +1,11 @@
 import unittest
+from contextlib import contextmanager
 from copy import deepcopy
 from unittest.mock import Mock, patch
 
 from tests.quote_fixture import answer, call
 from work_agent.runner import AssignmentError, OpenAIModel, RESPONSES_TOOLS, run_assignment
+from work_agent.storage import InactiveTurn
 
 
 def completed(*items):
@@ -20,6 +22,27 @@ def search(index):
 
 
 class RunnerReviewTests(unittest.TestCase):
+    def test_dispatch_checks_turn_between_tools_in_one_response(self):
+        model = Mock()
+        model.respond.return_value = completed(
+            call("calc", "calculate", expression="2 + 2"),
+            call("write", "write_artifact", name="draft.md", content="# Draft"),
+        )
+        stage = Mock()
+        records = []
+
+        @contextmanager
+        def tool_scope():
+            if any(step["type"] == "function_call_output" for step in records):
+                raise InactiveTurn("The turn was stopped after the first tool.")
+            yield
+
+        with self.assertRaises(InactiveTurn):
+            run_assignment(model, "Calculate and save.", {}, stage, Mock(), records.append, tool_scope=tool_scope)
+
+        stage.assert_not_called()
+        self.assertEqual([step["call_id"] for step in records if step["type"] == "function_call_output"], ["calc"])
+
     def test_commentary_and_reasoning_turns_continue(self):
         commentary = {**answer("I will check the details."), "phase": "commentary"}
         reasoning = {"type": "reasoning", "id": "rs_fixture", "encrypted_content": "opaque", "summary": []}
