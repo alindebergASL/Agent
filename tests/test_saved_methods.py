@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import tempfile
 import time
 import unittest
@@ -151,6 +152,11 @@ class SavedMethodTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 303, saved.text)
         return origin, old_history["response"], saved.headers["location"]
 
+    def revision(self, page):
+        token = re.search(r'name="expected_revision" value="([0-9]+)"', page.text)
+        self.assertIsNotNone(token, page.text)
+        return token.group(1)
+
     def test_related_run_retrieves_only_scoped_method_after_restart(self):
         with TestClient(create_app(data_dir=self.data, model=SourceQuoteModel())) as client:
             origin, old_response, method_url = self.save_source_method(client)
@@ -161,7 +167,10 @@ class SavedMethodTests(unittest.TestCase):
             self.assertEqual(detail.status_code, 200, detail.text)
             self.assertIn(EVIDENCE, detail.text)
             self.assertIn(origin, detail.text)
-            edit = client.post(method_url, data={**METHOD, "procedure": EDITED_PROCEDURE}, follow_redirects=False)
+            edit_form = client.get(method_url, params={"edit": 1})
+            edit = client.post(method_url, data={
+                **METHOD, "procedure": EDITED_PROCEDURE, "expected_revision": self.revision(edit_form),
+            }, follow_redirects=False)
             self.assertEqual(edit.status_code, 303, edit.text)
             self.assertEqual(edit.headers["location"], method_url)
 
@@ -207,7 +216,9 @@ class SavedMethodTests(unittest.TestCase):
     def test_removed_method_is_not_offered_or_readable(self):
         with TestClient(create_app(data_dir=self.data, model=SourceQuoteModel())) as client:
             _, _, method_url = self.save_source_method(client)
-            removed = client.post(method_url + "/remove", follow_redirects=False)
+            removed = client.post(method_url + "/remove", data={
+                "expected_revision": self.revision(client.get(method_url)),
+            }, follow_redirects=False)
             self.assertEqual(removed.status_code, 303, removed.text)
             self.assertEqual(client.get(method_url).status_code, 404)
             self.assertNotIn(METHOD["title"], client.get("/methods").text)
@@ -222,3 +233,37 @@ class SavedMethodTests(unittest.TestCase):
         removed_receipt = tool_outputs(history["turns"][0]["steps"])["removed"]
         self.assertIn("error", removed_receipt)
         self.assertNotIn("procedure", removed_receipt)
+
+    def test_stale_forms_preserve_current_method_and_submitted_draft(self):
+        with TestClient(create_app(data_dir=self.data, model=SourceQuoteModel())) as client:
+            _, _, url = self.save_source_method(client)
+            original = self.revision(client.get(url, params={"edit": 1}))
+            old_remove = self.revision(client.get(url))
+            changed = {**METHOD, "scope": "Freight quotes with multiple currencies."}
+            edited = client.post(url, data={**changed, "expected_revision": original}, follow_redirects=False)
+            self.assertEqual(edited.status_code, 303)
+
+            draft = {**METHOD, "procedure": "Check the currency before adding freight."}
+            stale = client.post(url, data={**draft, "expected_revision": original})
+            self.assertEqual(stale.status_code, 409)
+            self.assertIn(draft["procedure"], stale.text)
+            self.assertIn(changed["scope"], stale.text)
+            current = client.get(url)
+            self.assertNotIn(draft["procedure"], current.text)
+            self.assertIn(changed["scope"], current.text)
+            rejected = client.post(url + "/remove", data={"expected_revision": old_remove})
+            self.assertEqual(rejected.status_code, 409)
+            self.assertIn(changed["scope"], rejected.text)
+
+            merged = {**draft, "scope": changed["scope"], "expected_revision": self.revision(stale)}
+            saved = client.post(url, data=merged, follow_redirects=False)
+            self.assertEqual(saved.status_code, 303)
+            latest = client.get(url)
+            self.assertIn(changed["scope"], latest.text)
+            self.assertIn(draft["procedure"], latest.text)
+            removed = client.post(url + "/remove", data={"expected_revision": self.revision(latest)}, follow_redirects=False)
+            self.assertEqual(removed.status_code, 303)
+            after_removal = client.post(url, data=merged)
+            self.assertEqual(after_removal.status_code, 404)
+            self.assertIn(draft["procedure"], after_removal.text)
+            self.assertEqual(client.get(url).status_code, 404)

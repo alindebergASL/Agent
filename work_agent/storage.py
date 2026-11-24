@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS saved_methods (
     scope TEXT NOT NULL,
     procedure TEXT NOT NULL,
     evidence TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS saved_methods_recent ON saved_methods(updated_at DESC, id DESC);
 """
@@ -130,6 +131,9 @@ class Store:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
+            columns = connection.execute("PRAGMA table_info(saved_methods)")
+            if "revision" not in {column["name"] for column in columns}:
+                connection.execute("ALTER TABLE saved_methods ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
             for table in ("events", "run_steps"):
                 columns = connection.execute(f"PRAGMA table_info({table})")
                 if "turn_id" not in {column["name"] for column in columns}:
@@ -676,21 +680,31 @@ class Store:
             row = connection.execute("SELECT * FROM saved_methods WHERE id = ?", (method_id,)).fetchone()
             return dict(row) if row else None
 
-    def update_method(self, method_id: int, title: str, scope: str, procedure: str, evidence: str) -> None:
+    def _require_method_revision(self, connection, method_id: int, expected_revision: int) -> None:
+        row = connection.execute("SELECT revision FROM saved_methods WHERE id = ?", (method_id,)).fetchone()
+        if row is None:
+            raise KeyError(method_id)
+        if row["revision"] != expected_revision:
+            raise RevisionConflict("This method has changed.")
+
+    def update_method(
+        self, method_id: int, title: str, scope: str, procedure: str, evidence: str, *, expected_revision: int,
+    ) -> None:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_method_revision(connection, method_id, expected_revision)
             values = self._method_values(title, scope, procedure, evidence)
-            result = connection.execute(
+            connection.execute(
                 """
-                UPDATE saved_methods SET title = ?, scope = ?, procedure = ?, evidence = ?, updated_at = ?
+                UPDATE saved_methods SET title = ?, scope = ?, procedure = ?, evidence = ?, updated_at = ?,
+                    revision = revision + 1
                 WHERE id = ?
                 """,
                 (*values, method_id),
             )
-            if result.rowcount == 0:
-                raise KeyError(method_id)
 
-    def remove_method(self, method_id: int) -> None:
+    def remove_method(self, method_id: int, *, expected_revision: int) -> None:
         with self._connection() as connection:
-            if connection.execute("DELETE FROM saved_methods WHERE id = ?", (method_id,)).rowcount == 0:
-                raise KeyError(method_id)
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_method_revision(connection, method_id, expected_revision)
+            connection.execute("DELETE FROM saved_methods WHERE id = ?", (method_id,))

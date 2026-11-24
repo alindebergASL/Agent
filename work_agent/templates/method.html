@@ -15,6 +15,8 @@
   <p class="prose">{{ method.evidence }}</p>
   <p><a href="{{ url_for('assignment', task_id=method.source_task_id) }}">Source assignment</a></p>
   <form action="{{ url_for('remove_method', method_id=method.id) }}" method="post">
+    {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+    <input type="hidden" name="expected_revision" value="{{ method.revision }}">
     <button type="submit">Remove method</button>
   </form>
 </section>

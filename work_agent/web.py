@@ -321,6 +321,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
 
     def render_method_form(
         request, source_task_id, *, method_id=None, values=None, error=None, status_code=200,
+        expected_revision=None, current=None, removed=False,
     ):
         return templates.TemplateResponse(
             request=request,
@@ -331,34 +332,61 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
                 "values": values or {},
                 "limits": METHOD_FIELD_LIMITS,
                 "error": error,
+                "expected_revision": expected_revision,
+                "current": current,
+                "removed": removed,
             },
             status_code=status_code,
         )
 
-    async def submit_method(request, source_task_id, *, method_id=None):
+    def method_revision(form):
+        revision = form.get("expected_revision", "")
+        if not isinstance(revision, str) or not revision.isascii() or not revision.isdigit() or len(revision) > 19:
+            raise HTTPException(400, "Open the current method before changing it.")
+        number = int(revision)
+        if not 1 <= number <= MAX_RECORD_NUMBER:
+            raise HTTPException(400, "Invalid method revision.")
+        return number
+
+    async def submit_method(request, source_task_id=None, *, method_id=None):
         check_form_origin(request)
         check_form_size(request, sum(METHOD_FIELD_LIMITS.values()) * 12 + 1024)
         values = {}
+        expected_revision = None
         try:
             async with request.form(
-                max_files=0, max_fields=len(METHOD_FIELD_LIMITS), max_part_size=max(METHOD_FIELD_LIMITS.values()) * 4,
+                max_files=0, max_fields=len(METHOD_FIELD_LIMITS) + 1, max_part_size=max(METHOD_FIELD_LIMITS.values()) * 4,
             ) as form:
                 for field in METHOD_FIELD_LIMITS:
                     value = form.get(field, "")
                     if not isinstance(value, str):
                         raise ValueError("Enter text for each method field.")
                     values[field] = value
+                if method_id is not None:
+                    expected_revision = method_revision(form)
             if method_id is None:
                 method_id = await asyncio.to_thread(store.save_method, source_task_id, **values)
             else:
-                await asyncio.to_thread(store.update_method, method_id, **values)
-        except KeyError:
-            label = "Assignment" if method_id is None else "Saved method"
-            raise HTTPException(404, f"{label} not found.") from None
+                await asyncio.to_thread(store.update_method, method_id, expected_revision=expected_revision, **values)
+        except (RevisionConflict, KeyError):
+            if method_id is None:
+                raise HTTPException(404, "Assignment not found.") from None
+            current = store.get_method(method_id)
+            if current is None:
+                return render_method_form(
+                    request, source_task_id, method_id=method_id, values=values, removed=True, status_code=404,
+                    error="This method was removed. You can copy your draft below.",
+                )
+            return render_method_form(
+                request, source_task_id, method_id=method_id, values=values, current=current,
+                expected_revision=current["revision"], status_code=409,
+                error="Review the latest saved method below and reconcile your draft before saving.",
+            )
         except (HTTPException, ValueError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
             return render_method_form(
-                request, source_task_id, method_id=method_id, values=values, error=error, status_code=400,
+                request, source_task_id, method_id=method_id, values=values, expected_revision=expected_revision,
+                error=error, status_code=400,
             )
         return RedirectResponse(request.url_for("method_detail", method_id=method_id), status_code=303)
 
@@ -376,19 +404,29 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
     def method_detail(request: Request, method_id: MethodId, edit: bool = False):
         method = find_method(method_id)
         if edit:
-            return render_method_form(request, method["source_task_id"], method_id=method_id, values=method)
+            return render_method_form(
+                request, method["source_task_id"], method_id=method_id, values=method, expected_revision=method["revision"],
+            )
         return templates.TemplateResponse(request=request, name="method.html", context={"method": method})
 
     @app.post("/methods/{method_id}")
     async def update_method(request: Request, method_id: MethodId):
-        method = find_method(method_id)
-        return await submit_method(request, method["source_task_id"], method_id=method_id)
+        return await submit_method(request, method_id=method_id)
 
     @app.post("/methods/{method_id}/remove")
     async def remove_method(request: Request, method_id: MethodId):
         check_form_origin(request)
+        check_form_size(request, 1024)
+        async with request.form(max_files=0, max_fields=1, max_part_size=64) as form:
+            expected_revision = method_revision(form)
         try:
-            await asyncio.to_thread(store.remove_method, method_id)
+            await asyncio.to_thread(store.remove_method, method_id, expected_revision=expected_revision)
+        except RevisionConflict:
+            return templates.TemplateResponse(
+                request=request, name="method.html",
+                context={"method": find_method(method_id), "error": "Review the updated method before removing it."},
+                status_code=409,
+            )
         except KeyError:
             raise HTTPException(404, "Saved method not found.") from None
         return RedirectResponse(request.url_for("methods"), status_code=303)
