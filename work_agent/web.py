@@ -68,6 +68,9 @@ def work_pending(store, model, wake, stop, turn_lock):
                 tool_scope=tool_scope,
                 method_index=method_index,
                 read_method=store.get_method,
+                stage_method=lambda title, scope, procedure, evidence: store.stage_method(
+                    task_id, title, scope, procedure, evidence, turn_id=turn_id,
+                ),
             )
             store.complete(task_id, response, turn_id=turn_id)
         except InactiveTurn:
