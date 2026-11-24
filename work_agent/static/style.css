@@ -30,6 +30,9 @@ a { color: var(--accent); text-underline-offset: .18em; }
 .help { margin: .15rem 0; color: var(--soft); font-size: .9rem; }
 .notice { background: #fff4da; padding: .6rem .8rem; border-radius: .4rem; }
 .heading, .entries li { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
+.assignment-nav, .schedule-fields { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
+.schedule-fields select, .schedule-fields input { border: 1px solid #9ca896; border-radius: .4rem; padding: .45rem .65rem; font: inherit; }
+.responsibility-form button { margin-top: .75rem; }
 .entries { list-style: none; padding: 0; margin: 0; }
 .entries li { border-top: 1px solid var(--line); padding: .5rem 0; overflow-wrap: anywhere; }
 .status { background: #e7edf4; color: #30465c; padding: .15rem .55rem; border-radius: .35rem; font-size: .85rem; }

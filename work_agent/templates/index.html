@@ -3,7 +3,10 @@
 <section class="panel">
   <div class="heading">
     <h1>New assignment</h1>
-    <a href="{{ url_for('methods') }}">Saved methods</a>
+    <nav class="assignment-nav" aria-label="Assignment features">
+      <a href="{{ url_for('methods') }}">Saved methods</a>
+      <a href="{{ url_for('responsibility') }}">Weekly responsibility</a>
+    </nav>
   </div>
   {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
   {% if not enabled %}<p class="notice">Set <code>OPENAI_API_KEY</code> and restart the app to submit assignments.</p>{% endif %}

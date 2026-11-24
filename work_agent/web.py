@@ -2,9 +2,11 @@
 
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
+import sqlite3
 from threading import Event, Lock, Thread
 from typing import Annotated
 from urllib.parse import quote, urlsplit
@@ -18,7 +20,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .artifact_preview import is_upload_name, markdown_preview
 from .runner import AssignmentError, OpenAIModel, run_assignment
-from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, METHOD_FIELD_LIMITS, RevisionConflict, Store
+from .scheduling import PACIFIC, WEEKDAYS, format_pacific, parse_schedule_time, utc_now
+from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, MAX_SCHEDULE_REQUEST_CHARS, METHOD_FIELD_LIMITS, RevisionConflict, Store
 
 APP_DIR = Path(__file__).parent
 MAX_FILES = 8
@@ -28,13 +31,22 @@ MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
 MAX_RECORD_NUMBER = 2**63 - 1
 METHOD_INDEX_LIMIT = 8
 MethodId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
+ScheduleId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 logger = logging.getLogger(__name__)
 
 
-def work_pending(store, model, wake, stop, turn_lock):
+def work_pending(store, model, wake, stop, turn_lock, clock):
     while not stop.is_set():
         wake.clear()
-        task_id = store.claim()
+        try:
+            store.enqueue_due_schedule(now=clock())
+            task_id = store.claim()
+        except sqlite3.OperationalError as exc:
+            # SQLite's low byte is the primary result code for extended errors too.
+            if getattr(exc, "sqlite_errorcode", 0) & 0xff != sqlite3.SQLITE_BUSY:
+                raise
+            logger.warning("Database busy while polling for work. Retrying.")
+            task_id = None
         if task_id is None:
             wake.wait(timeout=1)
             continue
@@ -94,13 +106,13 @@ def check_form_size(request: Request, limit: int) -> None:
         raise HTTPException(413, "The form is too large or has no content length.")
 
 
-def assignment_request(value) -> str:
-    if not isinstance(value, str) or not 0 < len(value.strip()) <= MAX_REQUEST_CHARS:
-        raise ValueError(f"Enter a request of up to {MAX_REQUEST_CHARS:,} characters.")
+def assignment_request(value, *, max_chars=MAX_REQUEST_CHARS) -> str:
+    if not isinstance(value, str) or not 0 < len(value.strip()) <= max_chars:
+        raise ValueError(f"Enter a request of up to {max_chars:,} characters.")
     return value.strip()
 
 
-def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
+def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> FastAPI:
     store = Store(Path(data_dir or os.environ.get("WORK_AGENT_DATA_DIR", "data")))
     if model is None and os.environ.get("OPENAI_API_KEY"):
         model = OpenAIModel(
@@ -121,7 +133,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
             return
 
         stop.clear()
-        worker = Thread(target=work_pending, args=(store, model, wake, stop, turn_lock), daemon=True)
+        worker = Thread(target=work_pending, args=(store, model, wake, stop, turn_lock, clock), daemon=True)
         worker.start()
         try:
             yield
@@ -146,6 +158,70 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
     @app.get("/")
     def index(request: Request):
         return render_index(request)
+
+    def render_responsibility(request, *, values=None, error=None, status_code=200):
+        return templates.TemplateResponse(
+            request=request,
+            name="responsibility.html",
+            context={
+                "schedule": store.get_schedule(),
+                "weekdays": WEEKDAYS,
+                "values": values if values is not None else {"request": "", "weekday": "4", "local_time": "09:00"},
+                "max_request_chars": MAX_SCHEDULE_REQUEST_CHARS,
+                "format_pacific": format_pacific,
+                "iso_pacific": lambda instant: datetime.fromtimestamp(instant, PACIFIC).isoformat(),
+                "enabled": model is not None,
+                "error": error,
+            },
+            status_code=status_code,
+        )
+
+    @app.get("/responsibility")
+    def responsibility(request: Request):
+        return render_responsibility(request)
+
+    @app.post("/responsibility")
+    async def save_responsibility(request: Request):
+        check_form_origin(request)
+        check_form_size(request, MAX_SCHEDULE_REQUEST_CHARS * 12 + 1024)
+        values = {}
+        try:
+            async with request.form(max_files=0, max_fields=3, max_part_size=MAX_SCHEDULE_REQUEST_CHARS * 4) as form:
+                for field in ("request", "weekday", "local_time"):
+                    value = form.get(field, "")
+                    if not isinstance(value, str):
+                        raise ValueError("Enter text for each responsibility field.")
+                    values[field] = value
+            prompt = assignment_request(values["request"], max_chars=MAX_SCHEDULE_REQUEST_CHARS)
+            if "\x00" in prompt:
+                raise ValueError("Enter a plain-text request.")
+            if len(values["weekday"]) != 1 or values["weekday"] not in "0123456":
+                raise ValueError("Choose a weekday.")
+            parse_schedule_time(values["local_time"])
+        except (HTTPException, ValueError) as exc:
+            message = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            return render_responsibility(request, values=values, error=message, status_code=400)
+        try:
+            await asyncio.to_thread(
+                store.create_schedule, prompt, int(values["weekday"]), values["local_time"], now=clock(),
+            )
+        except ValueError as exc:
+            return render_responsibility(request, values=values, error=str(exc), status_code=409)
+        wake.set()
+        return RedirectResponse(request.url_for("responsibility"), status_code=303)
+
+    @app.post("/responsibility/{schedule_id}/stop")
+    async def stop_responsibility(request: Request, schedule_id: ScheduleId):
+        check_form_origin(request)
+        check_form_size(request, 1024)
+        try:
+            await asyncio.to_thread(store.stop_schedule, schedule_id, now=clock())
+        except KeyError:
+            raise HTTPException(404, "Weekly responsibility not found.") from None
+        except ValueError as exc:
+            return render_responsibility(request, error=str(exc), status_code=409)
+        wake.set()
+        return RedirectResponse(request.url_for("responsibility"), status_code=303)
 
     @app.post("/tasks")
     async def submit(request: Request):
