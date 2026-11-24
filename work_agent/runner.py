@@ -23,7 +23,8 @@ INSTRUCTIONS = (
     "result. Use direct calls for single reads and when independent batching does not help. "
     "Call calculate and write_artifact directly. "
     "On a follow-up, use the latest user instructions and carry forward relevant prior instructions. "
-    "Before updating a saved file, read its current revision with read_saved_artifact. "
+    "Before replacing a saved file, read every line of its current revision with read_saved_artifact. "
+    "Read additional pages as needed and issue the replacement only after receiving all of the read results. "
     "Use the exact existing filename to keep its link stable. Preserve the user's edits and notes "
     "verbatim unless the latest request explicitly changes them. "
     "For research on the public web, search for relevant sources and open the pages "
@@ -220,7 +221,7 @@ def _dispatch(
     stage: Callable[[str, str], None],
     saved_artifacts: Mapping[str, dict],
     read_saved_artifact: Callable[[str], bytes | None] | None,
-    read_artifacts: set[str],
+    fully_read: set[str],
 ):
     try:
         arguments = json.loads(call["arguments"])
@@ -247,8 +248,6 @@ def _dispatch(
                 {filename: data.decode("utf-8")}, filename,
                 arguments["start_line"], arguments["line_count"],
             )
-            if result["lines"] or not result["total_lines"]:
-                read_artifacts.add(filename)
             return {**result, **saved_artifacts[filename]}
         if name == "calculate" and arguments.keys() == {"expression"}:
             return {"result": _calculate(arguments["expression"])}
@@ -256,8 +255,11 @@ def _dispatch(
             filename, content = arguments["name"], arguments["content"]
             if not isinstance(filename, str) or not isinstance(content, str):
                 raise ValueError("Artifact name and content must be text.")
-            if filename in saved_artifacts and filename not in read_artifacts:
-                raise ValueError("Read the saved revision with read_saved_artifact before replacing it.")
+            if filename in saved_artifacts and filename not in fully_read:
+                raise ValueError(
+                    "Read every line of the saved revision with read_saved_artifact, "
+                    "then replace it in a later model turn."
+                )
             stage(filename, content)
             return {
                 "staged": filename,
@@ -298,7 +300,8 @@ def run_assignment(
     ]
     deadline = time.monotonic() + 240
     remaining_calls = MAX_TOOL_CALLS
-    read_artifacts: set[str] = set()
+    lines_read: dict[str, set[int]] = {}
+    fully_read: set[str] = set()
     for _ in range(16):
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
@@ -352,11 +355,12 @@ def run_assignment(
                 continue
             raise AssignmentError("The model returned no final response.")
 
+        completed_reads = set()
         for call in calls:
             if not call.get("call_id"):
                 raise AssignmentError("The model returned a tool call without an ID.")
             tool_label = call["name"] if call.get("name") in TOOL_NAMES else "unknown"
-            result = _dispatch(call, uploads, stage, saved_artifacts, read_saved_artifact, read_artifacts)
+            result = _dispatch(call, uploads, stage, saved_artifacts, read_saved_artifact, fully_read)
             receipt = {
                 "type": "function_call_output",
                 "call_id": call["call_id"],
@@ -367,6 +371,12 @@ def run_assignment(
                 receipt["caller"] = caller
             record(receipt)
             history.append(receipt)
+            if tool_label == "read_saved_artifact" and "lines" in result:
+                filename = result["file_id"]
+                coverage = lines_read.setdefault(filename, set())
+                coverage.update(line["number"] for line in result["lines"])
+                if len(coverage) == result["total_lines"]:
+                    completed_reads.add(filename)
             if caller and caller["type"] == "program":
                 detail = ""
                 if tool_label == "read_file" and "file_id" in result:
@@ -376,4 +386,6 @@ def run_assignment(
                 progress(f"Hosted program {caller['caller_id']} called {tool_label}{detail}.")
             else:
                 progress(f"Running tool {tool_label}.")
+        # The model cannot see receipts from this batch until the next invocation.
+        fully_read.update(completed_reads)
     raise AssignmentError("The assignment reached its model turn limit.")

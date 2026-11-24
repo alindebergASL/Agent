@@ -25,7 +25,7 @@
   <h2>Uploaded files</h2>
   <ul>
     {% for name in task.uploads %}
-    <li><a href="{{ url_for('uploaded_source', task_id=task.id, name=name) }}">{{ name }}</a></li>
+    <li><a href="{{ url_for('uploaded_source', task_id=task.id, name=name|urlencode) }}">{{ name }}</a></li>
     {% endfor %}
   </ul>
   {% endif %}
