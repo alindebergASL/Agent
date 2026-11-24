@@ -4,11 +4,13 @@ import shutil
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(csv|md)")
 MAX_ARTIFACT_BYTES = 1024 * 1024
+METHOD_FIELD_LIMITS = {"title": 120, "scope": 500, "procedure": 4000, "evidence": 1000}
 INTERRUPTED = "The worker restarted before this assignment finished."
 SCHEMA_VERSION = 1
 STATUSES = "'queued','running','completed','failed','interrupted','stopped','superseded'"
@@ -80,6 +82,16 @@ CREATE TABLE IF NOT EXISTS staged_artifacts (
     content BLOB NOT NULL,
     PRIMARY KEY (turn_id, name)
 );
+CREATE TABLE IF NOT EXISTS saved_methods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_task_id TEXT NOT NULL REFERENCES tasks(id),
+    title TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    procedure TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS saved_methods_recent ON saved_methods(updated_at DESC, id DESC);
 """
 
 
@@ -621,3 +633,64 @@ class Store:
     def read_artifact(self, task_id: str, name: str) -> bytes | None:
         artifact = self.artifact_revision(task_id, name)
         return artifact["content"] if artifact else None
+
+    def _method_values(self, title: str, scope: str, procedure: str, evidence: str) -> tuple[str, ...]:
+        fields = []
+        for name, value in (("title", title), ("scope", scope), ("procedure", procedure), ("evidence", evidence)):
+            text = value.strip() if isinstance(value, str) else ""
+            limit = METHOD_FIELD_LIMITS[name]
+            if not text or len(text) > limit or "\x00" in text:
+                raise ValueError(f"Enter valid {name} text of up to {limit:,} characters.")
+            fields.append(text)
+        return (*fields, datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+
+    def save_method(self, source_task_id: str, title: str, scope: str, procedure: str, evidence: str) -> int:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            source = connection.execute("SELECT status FROM tasks WHERE id = ?", (source_task_id,)).fetchone()
+            if source is None:
+                raise KeyError(source_task_id)
+            if source["status"] != "completed":
+                raise ValueError("Save a method from a completed assignment.")
+            values = self._method_values(title, scope, procedure, evidence)
+            return connection.execute(
+                """
+                INSERT INTO saved_methods (source_task_id, title, scope, procedure, evidence, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?) RETURNING id
+                """,
+                (source_task_id, *values),
+            ).fetchone()["id"]
+
+    def list_methods(self, *, limit: int | None = None) -> list[dict]:
+        if limit is not None and (type(limit) is not int or not 0 <= limit < 2**63):
+            raise ValueError("A saved method limit must be a nonnegative integer.")
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM saved_methods ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (limit if limit is not None else -1,),
+            )
+            return [dict(row) for row in rows]
+
+    def get_method(self, method_id: int) -> dict | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM saved_methods WHERE id = ?", (method_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_method(self, method_id: int, title: str, scope: str, procedure: str, evidence: str) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            values = self._method_values(title, scope, procedure, evidence)
+            result = connection.execute(
+                """
+                UPDATE saved_methods SET title = ?, scope = ?, procedure = ?, evidence = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (*values, method_id),
+            )
+            if result.rowcount == 0:
+                raise KeyError(method_id)
+
+    def remove_method(self, method_id: int) -> None:
+        with self._connection() as connection:
+            if connection.execute("DELETE FROM saved_methods WHERE id = ?", (method_id,)).rowcount == 0:
+                raise KeyError(method_id)

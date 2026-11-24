@@ -9,7 +9,7 @@ from threading import Event, Lock, Thread
 from typing import Annotated
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Path as RoutePath, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,7 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .artifact_preview import is_upload_name, markdown_preview
 from .runner import AssignmentError, OpenAIModel, run_assignment
-from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, RevisionConflict, Store
+from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, METHOD_FIELD_LIMITS, RevisionConflict, Store
 
 APP_DIR = Path(__file__).parent
 MAX_FILES = 8
@@ -26,6 +26,8 @@ MAX_FILE_BYTES = 128 * 1024
 MAX_REQUEST_CHARS = 8_000
 MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
 MAX_RECORD_NUMBER = 2**63 - 1
+METHOD_INDEX_LIMIT = 8
+MethodId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,10 @@ def work_pending(store, model, wake, stop, turn_lock):
                 yield
 
         try:
+            method_index = [
+                {field: method[field] for field in ("id", "title", "scope")}
+                for method in store.list_methods(limit=METHOD_INDEX_LIMIT)
+            ]
             response = run_assignment(
                 model,
                 run["request"],
@@ -60,6 +66,8 @@ def work_pending(store, model, wake, stop, turn_lock):
                 saved_artifacts=run["artifacts"],
                 read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
                 tool_scope=tool_scope,
+                method_index=method_index,
+                read_method=store.get_method,
             )
             store.complete(task_id, response, turn_id=turn_id)
         except InactiveTurn:
@@ -291,6 +299,99 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
         if history is None:
             raise HTTPException(404, "Assignment not found.")
         return JSONResponse(history, headers={"Cache-Control": "no-store"})
+
+    @app.get("/methods")
+    def methods(request: Request):
+        return templates.TemplateResponse(
+            request=request, name="methods.html", context={"methods": store.list_methods()},
+        )
+
+    def find_method(method_id):
+        method = store.get_method(method_id)
+        if method is None:
+            raise HTTPException(404, "Saved method not found.")
+        return method
+
+    def check_method_source(task_id):
+        task = store.get_task(task_id)
+        if task is None:
+            raise HTTPException(404, "Assignment not found.")
+        if task["status"] != "completed":
+            raise HTTPException(409, "Save methods from completed assignments.")
+
+    def render_method_form(
+        request, source_task_id, *, method_id=None, values=None, error=None, status_code=200,
+    ):
+        return templates.TemplateResponse(
+            request=request,
+            name="method_form.html",
+            context={
+                "source_task_id": source_task_id,
+                "method_id": method_id,
+                "values": values or {},
+                "limits": METHOD_FIELD_LIMITS,
+                "error": error,
+            },
+            status_code=status_code,
+        )
+
+    async def submit_method(request, source_task_id, *, method_id=None):
+        check_form_origin(request)
+        check_form_size(request, sum(METHOD_FIELD_LIMITS.values()) * 12 + 1024)
+        values = {}
+        try:
+            async with request.form(
+                max_files=0, max_fields=len(METHOD_FIELD_LIMITS), max_part_size=max(METHOD_FIELD_LIMITS.values()) * 4,
+            ) as form:
+                for field in METHOD_FIELD_LIMITS:
+                    value = form.get(field, "")
+                    if not isinstance(value, str):
+                        raise ValueError("Enter text for each method field.")
+                    values[field] = value
+            if method_id is None:
+                method_id = await asyncio.to_thread(store.save_method, source_task_id, **values)
+            else:
+                await asyncio.to_thread(store.update_method, method_id, **values)
+        except KeyError:
+            label = "Assignment" if method_id is None else "Saved method"
+            raise HTTPException(404, f"{label} not found.") from None
+        except (HTTPException, ValueError) as exc:
+            error = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            return render_method_form(
+                request, source_task_id, method_id=method_id, values=values, error=error, status_code=400,
+            )
+        return RedirectResponse(request.url_for("method_detail", method_id=method_id), status_code=303)
+
+    @app.get("/tasks/{task_id}/save-method")
+    def method_from_task(request: Request, task_id: str):
+        check_method_source(task_id)
+        return render_method_form(request, task_id)
+
+    @app.post("/tasks/{task_id}/save-method")
+    async def save_method(request: Request, task_id: str):
+        check_method_source(task_id)
+        return await submit_method(request, task_id)
+
+    @app.get("/methods/{method_id}")
+    def method_detail(request: Request, method_id: MethodId, edit: bool = False):
+        method = find_method(method_id)
+        if edit:
+            return render_method_form(request, method["source_task_id"], method_id=method_id, values=method)
+        return templates.TemplateResponse(request=request, name="method.html", context={"method": method})
+
+    @app.post("/methods/{method_id}")
+    async def update_method(request: Request, method_id: MethodId):
+        method = find_method(method_id)
+        return await submit_method(request, method["source_task_id"], method_id=method_id)
+
+    @app.post("/methods/{method_id}/remove")
+    async def remove_method(request: Request, method_id: MethodId):
+        check_form_origin(request)
+        try:
+            await asyncio.to_thread(store.remove_method, method_id)
+        except KeyError:
+            raise HTTPException(404, "Saved method not found.") from None
+        return RedirectResponse(request.url_for("methods"), status_code=303)
 
     @app.get("/tasks/{task_id}/uploads/{name}")
     def uploaded_source(request: Request, task_id: str, name: str, download: bool = False):

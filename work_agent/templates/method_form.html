@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{% if method_id %}Edit method{% else %}Save reusable method{% endif %} · Work Agent{% endblock %}
+{% block body %}
+{% if method_id %}
+<a class="back" href="{{ url_for('method_detail', method_id=method_id) }}">← Method</a>
+{% else %}
+<a class="back" href="{{ url_for('assignment', task_id=source_task_id) }}">← Assignment</a>
+{% endif %}
+<section class="panel">
+  <h1>{% if method_id %}Edit method{% else %}Save reusable method{% endif %}</h1>
+  {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+  <form class="method-form" action="{% if method_id %}{{ url_for('update_method', method_id=method_id) }}{% else %}{{ url_for('save_method', task_id=source_task_id) }}{% endif %}" method="post" enctype="multipart/form-data">
+    <label for="method-title">Title</label>
+    <input id="method-title" name="title" type="text" maxlength="{{ limits.title }}" value="{{ values.get('title', '') }}" required>
+    <label for="method-scope">Scope</label>
+    <textarea id="method-scope" name="scope" rows="3" maxlength="{{ limits.scope }}" required>
+{{ values.get('scope', '') }}</textarea>
+    <label for="method-procedure">Procedure</label>
+    <textarea id="method-procedure" name="procedure" rows="7" maxlength="{{ limits.procedure }}" required>
+{{ values.get('procedure', '') }}</textarea>
+    <label for="method-evidence">Evidence</label>
+    <textarea id="method-evidence" name="evidence" rows="4" maxlength="{{ limits.evidence }}" required>
+{{ values.get('evidence', '') }}</textarea>
+    <button type="submit">{% if method_id %}Save changes{% else %}Save method{% endif %}</button>
+  </form>
+</section>
+{% endblock %}

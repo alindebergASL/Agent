@@ -18,6 +18,12 @@ REQUESTS = {
     f"Compare the cost of buying ten units delivered in one shipment. {SUFFIX}": 1,
 }
 UNITS = 10
+# Keep the offline fixture self-contained in the Compose image.
+QUOTE_HEADER = b"supplier,quote_id,part_number,unit_price_usd,freight_usd,freight_basis\n"
+QUOTE_UPLOADS = {
+    "supplier-a.csv": QUOTE_HEADER + b"Supplier A,A-01,00427,100.00,30.00,per shipment\n",
+    "supplier-b.csv": QUOTE_HEADER + b"Supplier B,B-01,00427,103.00,20.00,per order\n",
+}
 
 
 def call(call_id, tool_name, **arguments):

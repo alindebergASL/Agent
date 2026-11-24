@@ -52,6 +52,9 @@
     {% endfor %}
   </ul>
   {% endif %}
+  {% if task.status == "completed" %}
+  <p><a href="{{ url_for('method_from_task', task_id=task.id) }}">Save reusable method</a></p>
+  {% endif %}
 </section>
 {% if task.status in ("queued", "running", "interrupted") or control_error %}
 <section id="turn-controls" class="panel">
