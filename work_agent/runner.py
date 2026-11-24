@@ -307,6 +307,8 @@ def run_assignment(
     for _ in range(16):
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
+        # The worker records this only for an active turn. Once committed, this
+        # provider request can finish even if Stop arrives before the network send.
         progress("Waiting for the model.")
         response = model.respond(
             history, tools, INSTRUCTIONS, max_tool_calls=remaining_calls

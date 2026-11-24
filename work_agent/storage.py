@@ -272,7 +272,7 @@ class Store:
         ]
 
     def _can_follow_up(self, connection: sqlite3.Connection, task_id: str, status: str) -> bool:
-        if status == "completed":
+        if status in ("completed", "stopped"):
             return True
         return status == "failed" and connection.execute(
             "SELECT 1 FROM turns WHERE task_id = ? AND status = 'completed' LIMIT 1", (task_id,)
@@ -384,7 +384,15 @@ class Store:
                 return None
             active = turns[-1]
             messages = []
+            request_start = 0
             for previous, following in zip(turns, turns[1:]):
+                if previous["kind"] in ("initial", "follow-up"):
+                    request_start = len(messages)
+                if previous["status"] == "stopped":
+                    # Drop this request and its corrections from model context. The
+                    # complete sequence stays visible in the assignment history.
+                    del messages[request_start:]
+                    continue
                 if following["kind"] == "continuation":
                     continue
                 messages.append({"role": "user", "content": previous["request"]})

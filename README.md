@@ -45,7 +45,9 @@ The agent reads the saved revisions that were current when its turn started. If 
 
 ### Change course during a turn
 
-Choose **Stop** on the assignment page to stop a queued or running turn. To change the request during a running turn, send a correction. The app records the correction immediately and starts the corrected turn after any in-flight model request returns. The old turn cannot dispatch another tool or publish its draft.
+Choose **Stop** to stop the current turn. You can send a fresh instruction on the same assignment and reuse its uploads and saved files. To amend a running request, choose **Send correction**. The app records the correction immediately.
+
+Once “Waiting for the model” appears in the activity log, the worker has committed to that provider request, including any hosted searches it performs. If you stop or correct the turn at that point, the worker discards the result when it returns. The old turn can no longer run an application tool or publish a draft. The worker can then pick up the next queued turn.
 
 Closing the browser leaves the app working. If the app restarts during a turn, reopen the assignment and choose **Continue**. The app queues the interrupted request against the original uploads and the current saved revisions. The interrupted turn and its recorded steps stay in the history, and published artifacts remain available at their existing links.
 

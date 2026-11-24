@@ -115,6 +115,9 @@ class DelayedQuoteModel:
 
 
 class ResumeModel:
+    def __init__(self):
+        self.starting_contexts = []
+
     def respond(self, history, tools, instructions, *, max_tool_calls):
         outputs = tool_outputs(history)
         if "save" in outputs:
@@ -122,6 +125,7 @@ class ResumeModel:
         if "read" in outputs:
             source = outputs["read"]["lines"][-1]["text"]
             return response(call("save", "write_artifact", name="inventory.md", content=f"# Inventory\n\n{source}\n"))
+        self.starting_contexts.append(list(history))
         file, = current_input(history)["uploaded_files"]
         return response(call("read", "read_file", file_id=file, start_line=1, line_count=2))
 
@@ -275,3 +279,47 @@ class TurnControlTests(unittest.TestCase):
             self.assertEqual(client.get(task_url + "/uploads/inventory.csv?download=1").content, content)
             self.assertEqual(client.get(task_url + "/artifacts/inventory.md?download=1").text, "# Inventory\n\n00427,12\n")
             self.assertEqual(client.get(task_url + "/artifacts/pending.md").status_code, 404)
+
+    def test_new_request_after_stop_uses_uploads_and_keeps_completed_context(self):
+        store = Store(self.data)
+        store.initialize()
+        uploads = {"inventory.csv": b"part,units\r\n00427,12\r\n"}
+        first = store.submit("Discard these rows.", uploads)
+        store.stop_turn(first, store.get_task(first)["turns"][0]["id"])
+
+        later = store.submit("Keep identifiers padded.", uploads)
+        self.assertEqual(store.claim(), later)
+        store.stage(later, "baseline.md", "Identifier: 00427\n")
+        store.complete(later, "Saved the baseline.")
+        previous = store.follow_up(later, "Draft a removal notice.")
+        self.assertEqual(store.claim(), later)
+        corrected = store.correct_turn(later, previous, "Draft two removal notices.")
+        store.stop_turn(later, corrected)
+
+        model = ResumeModel()
+        fresh = "Save an inventory report."
+        cases = [
+            (first, [], ["Discard these rows."]),
+            (later, ["Keep identifiers padded.", "Saved the baseline."],
+             ["Keep identifiers padded.", "Draft a removal notice.", "Draft two removal notices."]),
+        ]
+        with TestClient(create_app(data_dir=self.data, model=model)) as client:
+            for task_id, expected_context, old_requests in cases:
+                with self.subTest(task_id=task_id):
+                    url = f"http://testserver/tasks/{task_id}"
+                    page = client.get(url)
+                    self.assertIn(f'action="{url}/follow-up"', page.text)
+                    self.assertNotIn(f'action="{url}/continue"', page.text)
+                    queued = client.post(url + "/follow-up", data={"request": fresh}, follow_redirects=False)
+                    self.assertEqual(queued.status_code, 303, queued.text)
+                    history = self.wait_for_status(client, url, "completed")
+                    self.assertEqual([turn["request"] for turn in history["turns"]], [*old_requests, fresh])
+                    self.assertEqual(history["turns"][-2]["status"], "stopped")
+                    self.assertEqual(history["turns"][-1]["kind"], "follow-up")
+                    context = model.starting_contexts[-1]
+                    self.assertEqual([item["content"] for item in context[:-1]], expected_context)
+                    self.assertEqual(current_input(context)["request"], fresh)
+                    result = client.get(url + "/artifacts/inventory.md?download=1")
+                    self.assertEqual(result.text, "# Inventory\n\n00427,12\n")
+            saved = client.get(f"/tasks/{later}/artifacts/baseline.md?download=1")
+            self.assertEqual(saved.text, "Identifier: 00427\n")
