@@ -1,11 +1,11 @@
 """Single-process web application and background assignment runner."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import logging
 import os
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Annotated
 from urllib.parse import quote, urlsplit
 
@@ -18,18 +18,18 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .artifact_preview import is_upload_name, markdown_preview
 from .runner import AssignmentError, OpenAIModel, run_assignment
-from .storage import MAX_ARTIFACT_BYTES, RevisionConflict, Store
+from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, RevisionConflict, Store
 
 APP_DIR = Path(__file__).parent
 MAX_FILES = 8
 MAX_FILE_BYTES = 128 * 1024
 MAX_REQUEST_CHARS = 8_000
 MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
-MAX_REVISION = 2**63 - 1
+MAX_RECORD_NUMBER = 2**63 - 1
 logger = logging.getLogger(__name__)
 
 
-def work_pending(store, model, wake, stop):
+def work_pending(store, model, wake, stop, turn_lock):
     while not stop.is_set():
         wake.clear()
         task_id = store.claim()
@@ -41,6 +41,13 @@ def work_pending(store, model, wake, stop):
         if run is None:
             continue
         turn_id = run["turn_id"]
+
+        @contextmanager
+        def tool_scope():
+            with turn_lock:
+                store.require_running(task_id, turn_id)
+                yield
+
         try:
             response = run_assignment(
                 model,
@@ -52,8 +59,11 @@ def work_pending(store, model, wake, stop):
                 prior_messages=run["prior_messages"],
                 saved_artifacts=run["artifacts"],
                 read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
+                tool_scope=tool_scope,
             )
             store.complete(task_id, response, turn_id=turn_id)
+        except InactiveTurn:
+            continue
         except (AssignmentError, RevisionConflict) as exc:
             store.fail(task_id, str(exc), turn_id=turn_id)
         except Exception:
@@ -90,6 +100,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
 
     wake = Event()
     stop = Event()
+    turn_lock = Lock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -99,7 +110,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
             return
 
         stop.clear()
-        worker = Thread(target=work_pending, args=(store, model, wake, stop), daemon=True)
+        worker = Thread(target=work_pending, args=(store, model, wake, stop, turn_lock), daemon=True)
         worker.start()
         try:
             yield
@@ -172,14 +183,23 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
         wake.set()
         return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
 
-    def render_assignment(request, task_id, *, draft="", error=None, status_code=200):
+    def render_assignment(
+        request, task_id, *, draft="", error=None, correction_draft="", control_error=None, status_code=200,
+    ):
         task = store.get_task(task_id)
         if task is None:
             raise HTTPException(404, "Assignment not found.")
         return templates.TemplateResponse(
             request=request,
             name="task.html",
-            context={"task": task, "follow_up_enabled": model is not None, "draft": draft, "form_error": error},
+            context={
+                "task": task,
+                "follow_up_enabled": model is not None,
+                "draft": draft,
+                "form_error": error,
+                "correction_draft": correction_draft,
+                "control_error": control_error,
+            },
             status_code=status_code,
         )
 
@@ -210,6 +230,60 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
             return render_assignment(request, task_id, draft=draft, error=str(exc), status_code=409)
         wake.set()
         return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
+
+    def apply_turn_control(action, *args):
+        with turn_lock:
+            action(*args)
+
+    async def turn_control(request, task_id, action, *, correction=False, requires_model=False):
+        check_form_origin(request)
+        check_form_size(request, MAX_REQUEST_CHARS * 12 + 1024 if correction else 1024)
+        if requires_model and model is None:
+            return render_assignment(
+                request, task_id, control_error="Configure a model to continue this assignment.", status_code=503,
+            )
+
+        draft = ""
+        try:
+            async with request.form(
+                max_files=0, max_fields=2 if correction else 1, max_part_size=MAX_REQUEST_CHARS * 4,
+            ) as form:
+                expected = form.get("turn_id", "")
+                if not isinstance(expected, str) or not expected.isdecimal() or not 0 < len(expected) <= 19:
+                    raise ValueError("Open the current turn before changing it.")
+                expected_turn_id = int(expected)
+                if not 1 <= expected_turn_id <= MAX_RECORD_NUMBER:
+                    raise ValueError("Open the current turn before changing it.")
+                args = (task_id, expected_turn_id)
+                if correction:
+                    value = form.get("request", "")
+                    if isinstance(value, str):
+                        draft = value
+                    args += (assignment_request(value),)
+        except (HTTPException, ValueError) as exc:
+            error = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            return render_assignment(request, task_id, correction_draft=draft, control_error=error, status_code=400)
+
+        try:
+            await asyncio.to_thread(apply_turn_control, action, *args)
+        except KeyError:
+            raise HTTPException(404, "Assignment not found.") from None
+        except (InactiveTurn, ValueError) as exc:
+            return render_assignment(request, task_id, correction_draft=draft, control_error=str(exc), status_code=409)
+        wake.set()
+        return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
+
+    @app.post("/tasks/{task_id}/stop")
+    async def stop_turn(request: Request, task_id: str):
+        return await turn_control(request, task_id, store.stop_turn)
+
+    @app.post("/tasks/{task_id}/correct")
+    async def correct_turn(request: Request, task_id: str):
+        return await turn_control(request, task_id, store.correct_turn, correction=True, requires_model=True)
+
+    @app.post("/tasks/{task_id}/continue")
+    async def continue_turn(request: Request, task_id: str):
+        return await turn_control(request, task_id, store.continue_turn, requires_model=True)
 
     @app.get("/tasks/{task_id}/history")
     def run_history(task_id: str):
@@ -260,7 +334,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
         task_id: str,
         name: str,
         download: bool = False,
-        revision: Annotated[int | None, Query(ge=1, le=MAX_REVISION)] = None,
+        revision: Annotated[int | None, Query(ge=1, le=MAX_RECORD_NUMBER)] = None,
     ):
         saved = store.artifact_revision(task_id, name, revision)
         if saved is None:
@@ -293,7 +367,7 @@ def create_app(data_dir: Path | None = None, model=None) -> FastAPI:
                 if not isinstance(expected, str) or not expected.isdecimal() or not 0 < len(expected) <= 19:
                     raise ValueError("Open the current revision before saving an edit.")
                 expected_revision = int(expected)
-                if not 1 <= expected_revision <= MAX_REVISION:
+                if not 1 <= expected_revision <= MAX_RECORD_NUMBER:
                     raise ValueError("Open the current revision before saving an edit.")
             await asyncio.to_thread(store.save_markdown, task_id, name, draft, expected_revision)
         except RevisionConflict:

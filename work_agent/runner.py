@@ -3,6 +3,7 @@ import json
 import operator
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from decimal import Decimal, DecimalException, localcontext
 
 from openai import APIError, OpenAI
@@ -282,6 +283,7 @@ def run_assignment(
     prior_messages: list[dict] | None = None,
     saved_artifacts: Mapping[str, dict] | None = None,
     read_saved_artifact: Callable[[str], bytes | None] | None = None,
+    tool_scope: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> str:
     saved_artifacts = saved_artifacts or {}
     tools = [*RESPONSES_TOOLS, READ_SAVED_ARTIFACT] if saved_artifacts else RESPONSES_TOOLS
@@ -360,16 +362,17 @@ def run_assignment(
             if not call.get("call_id"):
                 raise AssignmentError("The model returned a tool call without an ID.")
             tool_label = call["name"] if call.get("name") in TOOL_NAMES else "unknown"
-            result = _dispatch(call, uploads, stage, saved_artifacts, read_saved_artifact, fully_read)
-            receipt = {
-                "type": "function_call_output",
-                "call_id": call["call_id"],
-                "output": json.dumps(result),
-            }
-            caller = call.get("caller")
-            if caller:
-                receipt["caller"] = caller
-            record(receipt)
+            with tool_scope():
+                result = _dispatch(call, uploads, stage, saved_artifacts, read_saved_artifact, fully_read)
+                receipt = {
+                    "type": "function_call_output",
+                    "call_id": call["call_id"],
+                    "output": json.dumps(result),
+                }
+                caller = call.get("caller")
+                if caller:
+                    receipt["caller"] = caller
+                record(receipt)
             history.append(receipt)
             if tool_label == "read_saved_artifact" and "lines" in result:
                 filename = result["file_id"]

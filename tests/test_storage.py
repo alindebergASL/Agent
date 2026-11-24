@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from work_agent.storage import RevisionConflict, Store
+from work_agent.storage import SCHEMA, InactiveTurn, RevisionConflict, Store
 
 
 class StorageTests(unittest.TestCase):
@@ -99,3 +99,70 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(old["can_follow_up"])
         self.assertEqual(self.store.get_task("inflight")["turns"][0]["status"], "interrupted")
         self.assertIsNone(self.store.read_artifact("inflight", "report.md"))
+
+    def test_continuity_volume_retains_foreign_keys_and_supports_turn_controls(self):
+        with sqlite3.connect(self.root / "agent.sqlite3") as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.executescript("""
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY, request TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','interrupted')),
+                    created_at TEXT NOT NULL, response TEXT, error TEXT
+                );
+                CREATE TABLE turns (
+                    id INTEGER PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
+                    request TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','interrupted')),
+                    created_at TEXT NOT NULL, response TEXT, error TEXT
+                );
+            """)
+            connection.executescript(SCHEMA)
+            connection.executescript("""
+                INSERT INTO tasks VALUES ('old', 'Make a report.', 'running', 'one', NULL, NULL);
+                INSERT INTO turns VALUES (7, 'old', 'Make a report.', 'completed', 'one', 'Saved.', NULL);
+                INSERT INTO turns VALUES (8, 'old', 'Add one row.', 'running', 'two', NULL, NULL);
+                INSERT INTO uploads VALUES ('old', 0, 'source.csv');
+                INSERT INTO run_steps VALUES (1, 'old', '{"phase":"work"}', 8);
+                INSERT INTO events VALUES (1, 'old', 'Read source.', 8);
+                INSERT INTO artifact_revisions VALUES ('old', 'report.md', 1, 'agent', x'610d0a', 7);
+                INSERT INTO artifact_revisions VALUES ('old', 'report.md', 2, 'user', x'620d0a', NULL);
+                INSERT INTO turn_artifacts VALUES (8, 'report.md', 2);
+                INSERT INTO staged_artifacts VALUES (8, 'report.md', x'630d0a');
+            """)
+        inputs = self.root / "runs" / "old" / "inputs"
+        inputs.mkdir(parents=True)
+        (inputs / "0").write_bytes(b"id\r\n00427\r\n")
+
+        self.store.initialize()
+        self.store.initialize()
+        history = self.store.run_history("old")
+        self.assertEqual([(turn["id"], turn["kind"], turn["status"]) for turn in history["turns"]], [
+            (7, "initial", "completed"), (8, "follow-up", "interrupted"),
+        ])
+        self.assertEqual(history["turns"][1]["steps"], [{"phase": "work"}])
+        self.assertEqual(self.store.get_task("old")["events"], ["Read source."])
+        self.assertEqual(self.store.read_upload("old", "source.csv"), b"id\r\n00427\r\n")
+        self.assertEqual(self.store.artifact_revision("old", "report.md", 1)["content"], b"a\r\n")
+        self.assertEqual(self.store.read_run_artifact("old", 8, "report.md"), b"b\r\n")
+        with sqlite3.connect(self.root / "agent.sqlite3") as connection:
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(connection.execute("SELECT * FROM staged_artifacts").fetchall(), [])
+
+        continued = self.store.continue_turn("old", 8)
+        self.assertEqual(self.store.claim(), "old")
+        self.assertEqual(self.store.get_run("old")["request"], "Add one row.")
+        self.assertEqual(self.store.get_run("old")["prior_messages"], [
+            {"role": "user", "content": "Make a report."},
+            {"role": "assistant", "content": "Saved."},
+        ])
+        corrected = self.store.correct_turn("old", continued, "Add two rows.")
+        with self.assertRaises(ValueError):
+            self.store.stop_turn("old", continued)
+        with self.assertRaises(InactiveTurn):
+            self.store.complete("old", "Late result.", turn_id=continued)
+        self.store.stop_turn("old", corrected)
+        self.assertIsNone(self.store.claim())
+        self.assertEqual([turn["status"] for turn in self.store.get_task("old")["turns"]], [
+            "completed", "interrupted", "superseded", "stopped",
+        ])
+        self.assertEqual(self.store.read_artifact("old", "report.md"), b"b\r\n")

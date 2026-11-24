@@ -10,31 +10,40 @@ from pathlib import Path
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(csv|md)")
 MAX_ARTIFACT_BYTES = 1024 * 1024
 INTERRUPTED = "The worker restarted before this assignment finished."
+SCHEMA_VERSION = 1
+STATUSES = "'queued','running','completed','failed','interrupted','stopped','superseded'"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS tasks (
+TASKS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {{table}} (
     id TEXT PRIMARY KEY,
     request TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','interrupted')),
+    status TEXT NOT NULL CHECK (status IN ({STATUSES})),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     response TEXT,
     error TEXT
 );
+"""
+
+TURNS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS {{table}} (
+    id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    request TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ({STATUSES})),
+    kind TEXT NOT NULL CHECK (kind IN ('initial','follow-up','correction','continuation')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    response TEXT,
+    error TEXT
+);
+"""
+
+SCHEMA = TASKS_TABLE.format(table="tasks") + TURNS_TABLE.format(table="turns") + """
 CREATE TABLE IF NOT EXISTS uploads (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     position INTEGER NOT NULL,
     name TEXT NOT NULL,
     PRIMARY KEY (task_id, position),
     UNIQUE (task_id, name)
-);
-CREATE TABLE IF NOT EXISTS turns (
-    id INTEGER PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id),
-    request TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','interrupted')),
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    response TEXT,
-    error TEXT
 );
 CREATE INDEX IF NOT EXISTS turns_task ON turns(task_id, id);
 CREATE TABLE IF NOT EXISTS events (
@@ -78,6 +87,10 @@ class RevisionConflict(RuntimeError):
     """A saved artifact changed after the caller read it."""
 
 
+class InactiveTurn(RuntimeError):
+    """The worker's turn is no longer the active running turn."""
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -96,8 +109,15 @@ class Store:
     def initialize(self) -> None:
         (self.root / "runs").mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
-            connection.executescript(SCHEMA)
+            # Rebuilding parent tables must leave the existing child table references intact.
+            connection.execute("PRAGMA foreign_keys = OFF")
             connection.execute("BEGIN IMMEDIATE")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version < SCHEMA_VERSION:
+                self._upgrade_turn_schema(connection)
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
             for table in ("events", "run_steps"):
                 columns = connection.execute(f"PRAGMA table_info({table})")
                 if "turn_id" not in {column["name"] for column in columns}:
@@ -112,6 +132,45 @@ class Store:
                 "UPDATE tasks SET status = 'interrupted', error = ? WHERE status = 'running'",
                 (INTERRUPTED,),
             )
+            connection.execute(
+                """
+                DELETE FROM staged_artifacts
+                WHERE turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')
+                """
+            )
+            if version < SCHEMA_VERSION:
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise RuntimeError("Assignment database migration found a broken reference.")
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _upgrade_turn_schema(self, connection: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('tasks', 'turns')"
+        )}
+        if "tasks" in existing:
+            connection.execute(TASKS_TABLE.format(table="tasks_upgrade"))
+            connection.execute(
+                """
+                INSERT INTO tasks_upgrade (rowid, id, request, status, created_at, response, error)
+                SELECT rowid, id, request, status, created_at, response, error FROM tasks
+                """
+            )
+            connection.execute("DROP TABLE tasks")
+            connection.execute("ALTER TABLE tasks_upgrade RENAME TO tasks")
+        if "turns" in existing:
+            connection.execute(TURNS_TABLE.format(table="turns_upgrade"))
+            connection.execute(
+                """
+                INSERT INTO turns_upgrade (id, task_id, request, status, created_at, response, error, kind)
+                SELECT id, task_id, request, status, created_at, response, error,
+                    CASE WHEN id = (
+                        SELECT MIN(first.id) FROM turns AS first WHERE first.task_id = turns.task_id
+                    ) THEN 'initial' ELSE 'follow-up' END
+                FROM turns
+                """
+            )
+            connection.execute("DROP TABLE turns")
+            connection.execute("ALTER TABLE turns_upgrade RENAME TO turns")
 
     def _migrate_tasks(self, connection: sqlite3.Connection) -> None:
         legacy = connection.execute(
@@ -124,8 +183,8 @@ class Store:
             task_id = task["id"]
             turn_id = connection.execute(
                 """
-                INSERT INTO turns (task_id, request, status, created_at, response, error)
-                VALUES (?, ?, ?, ?, ?, ?) RETURNING id
+                INSERT INTO turns (task_id, request, status, created_at, response, error, kind)
+                VALUES (?, ?, ?, ?, ?, ?, 'initial') RETURNING id
                 """,
                 (task_id, task["request"], task["status"], task["created_at"], task["response"], task["error"]),
             ).fetchone()["id"]
@@ -160,7 +219,7 @@ class Store:
                     (task_id, request),
                 )
                 connection.execute(
-                    "INSERT INTO turns (task_id, request, status) VALUES (?, ?, 'queued')",
+                    "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', 'initial')",
                     (task_id, request),
                 )
                 connection.executemany(
@@ -204,7 +263,10 @@ class Store:
         return [
             dict(row)
             for row in connection.execute(
-                "SELECT id, request, status, created_at, response, error FROM turns WHERE task_id = ? ORDER BY id",
+                """
+                SELECT id, request, status, kind, created_at, response, error
+                FROM turns WHERE task_id = ? ORDER BY id
+                """,
                 (task_id,),
             )
         ]
@@ -227,14 +289,63 @@ class Store:
                 raise KeyError(task_id)
             if not self._can_follow_up(connection, task_id, row["status"]):
                 raise ValueError("This assignment is not ready for a follow-up.")
-            turn_id = connection.execute(
-                "INSERT INTO turns (task_id, request, status) VALUES (?, ?, 'queued') RETURNING id",
-                (task_id, request),
-            ).fetchone()["id"]
-            connection.execute(
-                "UPDATE tasks SET status = 'queued', response = NULL, error = NULL WHERE id = ?", (task_id,)
-            )
-            return turn_id
+            return self._queue_turn(connection, task_id, request, "follow-up")
+
+    def _queue_turn(self, connection: sqlite3.Connection, task_id: str, request: str, kind: str) -> int:
+        turn_id = connection.execute(
+            "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', ?) RETURNING id",
+            (task_id, request, kind),
+        ).fetchone()["id"]
+        connection.execute(
+            "UPDATE tasks SET status = 'queued', response = NULL, error = NULL WHERE id = ?", (task_id,)
+        )
+        return turn_id
+
+    def _latest_turn(self, connection: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT id, status, request FROM turns WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
+        ).fetchone()
+
+    def _expected_turn(
+        self, connection: sqlite3.Connection, task_id: str, expected_turn_id: int,
+    ) -> sqlite3.Row:
+        turn = self._latest_turn(connection, task_id)
+        if turn is None:
+            raise KeyError(task_id)
+        if turn["id"] != expected_turn_id:
+            raise ValueError("This page shows an older turn. Reload the assignment and try again.")
+        return turn
+
+    def stop_turn(self, task_id: str, expected_turn_id: int) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            turn = self._expected_turn(connection, task_id, expected_turn_id)
+            if turn["status"] not in ("queued", "running"):
+                raise ValueError("Only a queued or running turn can be stopped.")
+            connection.execute("UPDATE turns SET status = 'stopped' WHERE id = ?", (turn["id"],))
+            connection.execute("UPDATE tasks SET status = 'stopped' WHERE id = ?", (task_id,))
+            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn["id"],))
+
+    def correct_turn(self, task_id: str, expected_turn_id: int, request: str) -> int:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            turn = self._expected_turn(connection, task_id, expected_turn_id)
+            if turn["status"] != "running":
+                raise ValueError("Only a running turn can be corrected.")
+            request = request.strip()
+            if not request:
+                raise ValueError("Enter a correction.")
+            connection.execute("UPDATE turns SET status = 'superseded' WHERE id = ?", (turn["id"],))
+            connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn["id"],))
+            return self._queue_turn(connection, task_id, request, "correction")
+
+    def continue_turn(self, task_id: str, expected_turn_id: int) -> int:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            turn = self._expected_turn(connection, task_id, expected_turn_id)
+            if turn["status"] != "interrupted":
+                raise ValueError("Only an interrupted turn can be continued.")
+            return self._queue_turn(connection, task_id, turn["request"], "continuation")
 
     def claim(self) -> str | None:
         with self._connection() as connection:
@@ -273,7 +384,9 @@ class Store:
                 return None
             active = turns[-1]
             messages = []
-            for previous in turns[:-1]:
+            for previous, following in zip(turns, turns[1:]):
+                if following["kind"] == "continuation":
+                    continue
                 messages.append({"role": "user", "content": previous["request"]})
                 if previous["status"] == "completed" and previous["response"]:
                     messages.append({"role": "assistant", "content": previous["response"]})
@@ -289,6 +402,7 @@ class Store:
             return {
                 "turn_id": active["id"],
                 "request": active["request"],
+                "kind": active["kind"],
                 "prior_messages": messages,
                 "artifacts": {
                     row["name"]: {"revision": row["revision"], "author": row["author"]} for row in artifacts
@@ -319,12 +433,14 @@ class Store:
         return (self._workspace(task_id) / "inputs" / str(row["position"])).read_bytes()
 
     def _running_turn(self, connection: sqlite3.Connection, task_id: str, turn_id: int | None) -> int:
-        row = connection.execute(
-            "SELECT id, status FROM turns WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)
-        ).fetchone()
+        row = self._latest_turn(connection, task_id)
         if row is None or row["status"] != "running" or (turn_id is not None and row["id"] != turn_id):
-            raise RuntimeError("This assignment turn is no longer running.")
+            raise InactiveTurn("This assignment turn is no longer running.")
         return row["id"]
+
+    def require_running(self, task_id: str, turn_id: int) -> None:
+        with self._connection() as connection:
+            self._running_turn(connection, task_id, turn_id)
 
     def _artifact_bytes(self, name: str, content: str) -> bytes:
         if not ARTIFACT_NAME.fullmatch(name):
@@ -428,7 +544,7 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 active = self._running_turn(connection, task_id, turn_id)
-            except RuntimeError:
+            except InactiveTurn:
                 return
             connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (active,))
             connection.execute("UPDATE turns SET status = 'failed', error = ? WHERE id = ?", (message, active))
