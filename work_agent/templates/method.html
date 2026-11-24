@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ method.title }} · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('methods') }}">← Saved methods</a>
+<section class="panel">
+  <div class="heading">
+    <h1>{{ method.title }}</h1>
+    <a href="{{ url_for('method_detail', method_id=method.id) }}?edit=1">Edit method</a>
+  </div>
+  <h2>Scope</h2>
+  <p class="prose">{{ method.scope }}</p>
+  <h2>Procedure</h2>
+  <p class="prose">{{ method.procedure }}</p>
+  <h2>Evidence</h2>
+  <p class="prose">{{ method.evidence }}</p>
+  <p><a href="{{ url_for('assignment', task_id=method.source_task_id) }}">Source assignment</a></p>
+  <form action="{{ url_for('remove_method', method_id=method.id) }}" method="post">
+    {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+    <input type="hidden" name="expected_revision" value="{{ method.revision }}">
+    <button type="submit">Remove method</button>
+  </form>
+</section>
+{% endblock %}

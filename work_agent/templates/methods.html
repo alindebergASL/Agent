@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Saved methods · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('index') }}">← Assignments</a>
+<section class="panel">
+  <h1>Saved methods</h1>
+  {% if methods %}
+  <ul class="entries">
+    {% for method in methods %}
+    <li>
+      <div>
+        <a href="{{ url_for('method_detail', method_id=method.id) }}">{{ method.title }}</a>
+        <p class="help prose">{{ method.scope }}</p>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>Save a reusable method from a completed assignment.</p>
+  {% endif %}
+</section>
+{% endblock %}

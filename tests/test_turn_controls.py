@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from tests.quote_fixture import REQUESTS, Quote, answer, call, tool_outputs
+from tests.quote_fixture import QUOTE_UPLOADS, REQUESTS, Quote, answer, call, tool_outputs
 from work_agent import runner
 from work_agent.storage import Store
 from work_agent.web import create_app
@@ -24,12 +24,6 @@ NOTE = "Confirm receiving hours before placing the order."
 BASE_CSV = "supplier,total_usd,source\n"
 BASE_MD = "# Recommendation\n\nAwaiting comparison.\n"
 EDITED_MD = BASE_MD + "\n" + NOTE + "\n"
-# The installed test image includes tests but does not need the example directory.
-QUOTE_HEADER = b"supplier,quote_id,part_number,unit_price_usd,freight_usd,freight_basis\n"
-QUOTE_UPLOADS = {
-    "supplier-a.csv": QUOTE_HEADER + b"Supplier A,A-01,00427,100.00,30.00,per shipment\n",
-    "supplier-b.csv": QUOTE_HEADER + b"Supplier B,B-01,00427,103.00,20.00,per order\n",
-}
 
 
 def response(*output):

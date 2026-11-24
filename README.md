@@ -51,6 +51,12 @@ Once “Waiting for the model” appears in the activity log, the worker has com
 
 Closing the browser leaves the app working. If the app restarts during a turn, reopen the assignment and choose **Continue**. The app queues the interrupted request against the original uploads and the current saved revisions. The interrupted turn and its recorded steps stay in the history, and published artifacts remain available at their existing links.
 
+### Reuse a verified method
+
+Check the result of a completed assignment, then choose **Save reusable method**. Give it a short title, describe when it applies, and write the procedure and the evidence you checked. Keep prices, decisions, and notes specific to that assignment out of the reusable procedure.
+
+The **Saved methods** page lets you inspect, edit, or remove a method and open its source assignment. New runs see a short index of the eight most recently updated methods. When the agent retrieves one, its activity and run history show the retrieval. The agent gets the procedure and scope while the evidence and source assignment remain available to you from the method page.
+
 The quote demonstration can also run against the offline Responses fixture. Use a separate Compose project so its saved assignments and model configuration stay separate from live runs.
 
 ```bash
