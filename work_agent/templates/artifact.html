@@ -7,6 +7,10 @@
     <h1>{{ name }}</h1>
     <a class="download" href="?download=1">Download</a>
   </div>
+  {% if markdown_html is not none %}
+  <div class="artifact-markdown">{{ markdown_html | safe }}</div>
+  {% else %}
   <pre>{{ content }}</pre>
+  {% endif %}
 </section>
 {% endblock %}

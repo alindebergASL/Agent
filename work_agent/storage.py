@@ -1,3 +1,4 @@
+import json
 import re
 import shutil
 import sqlite3
@@ -30,6 +31,12 @@ CREATE TABLE IF NOT EXISTS events (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     message TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS run_steps (
+    id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_steps_task ON run_steps(task_id, id);
 """
 
 
@@ -169,6 +176,30 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             self._require_running(connection, task_id)
             connection.execute("INSERT INTO events (task_id, message) VALUES (?, ?)", (task_id, message))
+
+    def record_step(self, task_id: str, step: dict) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_running(connection, task_id)
+            connection.execute(
+                "INSERT INTO run_steps (task_id, payload) VALUES (?, ?)",
+                (task_id, json.dumps(step)),
+            )
+
+    def run_history(self, task_id: str) -> dict | None:
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            task = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                return None
+            steps = connection.execute(
+                "SELECT payload FROM run_steps WHERE task_id = ? ORDER BY id", (task_id,)
+            )
+            return {
+                **dict(task),
+                "uploads": [entry["name"] for entry in self._uploads(connection, task_id)],
+                "steps": [json.loads(step["payload"]) for step in steps],
+            }
 
     def complete(self, task_id: str, response: str) -> None:
         with self._connection() as connection:

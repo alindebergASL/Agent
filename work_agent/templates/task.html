@@ -32,6 +32,7 @@
 {% if task.events %}
 <section class="panel">
   <h2>Activity</h2>
+  <p><a href="{{ url_for('run_history', task_id=task.id) }}">Run history (JSON)</a></p>
   <ol>{% for event in task.events %}<li>{{ event }}</li>{% endfor %}</ol>
 </section>
 {% endif %}
