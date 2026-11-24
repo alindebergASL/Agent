@@ -7,9 +7,12 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
+
 
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(csv|md)")
 MAX_ARTIFACT_BYTES = 1024 * 1024
+MAX_SCHEDULE_REQUEST_CHARS = 8_000
 METHOD_FIELD_LIMITS = {"title": 120, "scope": 500, "procedure": 4000, "evidence": 1000}
 INTERRUPTED = "The worker restarted before this assignment finished."
 SCHEMA_VERSION = 1
@@ -100,6 +103,21 @@ CREATE TABLE IF NOT EXISTS saved_methods (
     revision INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS saved_methods_recent ON saved_methods(updated_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS weekly_schedules (
+    id INTEGER PRIMARY KEY,
+    request TEXT NOT NULL,
+    weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+    local_time TEXT NOT NULL,
+    next_run_at INTEGER NOT NULL,
+    stopped_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_schedule ON weekly_schedules(1) WHERE stopped_at IS NULL;
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+    schedule_id INTEGER NOT NULL REFERENCES weekly_schedules(id),
+    due_at INTEGER NOT NULL,
+    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+    PRIMARY KEY (schedule_id, due_at)
+);
 """
 
 
@@ -235,14 +253,7 @@ class Store:
                 (inputs / str(position)).write_bytes(content)
                 entries.append((task_id, position, name))
             with self._connection() as connection:
-                connection.execute(
-                    "INSERT INTO tasks (id, request, status) VALUES (?, ?, 'queued')",
-                    (task_id, request),
-                )
-                connection.execute(
-                    "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', 'initial')",
-                    (task_id, request),
-                )
+                self._insert_task(connection, task_id, request)
                 connection.executemany(
                     "INSERT INTO uploads (task_id, position, name) VALUES (?, ?, ?)", entries
                 )
@@ -250,6 +261,115 @@ class Store:
             shutil.rmtree(workspace)
             raise
         return task_id
+
+    def _insert_task(self, connection: sqlite3.Connection, task_id: str, request: str) -> None:
+        connection.execute(
+            "INSERT INTO tasks (id, request, status) VALUES (?, ?, 'queued')",
+            (task_id, request),
+        )
+        connection.execute(
+            "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', 'initial')",
+            (task_id, request),
+        )
+
+    def create_schedule(self, request: str, weekday: int, local_time: str, *, now: datetime) -> int:
+        request = request.strip() if isinstance(request, str) else ""
+        if not 0 < len(request) <= MAX_SCHEDULE_REQUEST_CHARS or "\x00" in request:
+            raise ValueError(f"Enter a weekly request of up to {MAX_SCHEDULE_REQUEST_CHARS:,} characters.")
+        if type(weekday) is not int or not 0 <= weekday <= 6:
+            raise ValueError("Choose a day of the week.")
+        at = parse_schedule_time(local_time)
+        self._schedule_epoch(now)
+        next_run_at = next_occurrence(weekday, at, now)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute("SELECT 1 FROM weekly_schedules WHERE stopped_at IS NULL").fetchone()
+            if active is not None:
+                raise ValueError("Stop the current weekly responsibility before starting another.")
+            row = connection.execute(
+                """
+                INSERT INTO weekly_schedules (request, weekday, local_time, next_run_at)
+                VALUES (?, ?, ?, ?) RETURNING id
+                """,
+                (request, weekday, at.isoformat(timespec="minutes"), next_run_at),
+            ).fetchone()
+            return row["id"]
+
+    def get_schedule(self) -> dict | None:
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            schedule = connection.execute(
+                "SELECT * FROM weekly_schedules ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if schedule is None:
+                return None
+            latest_run = connection.execute(
+                """
+                SELECT occurrence.task_id, occurrence.due_at, task.status
+                FROM schedule_occurrences AS occurrence
+                JOIN tasks AS task ON task.id = occurrence.task_id
+                WHERE occurrence.schedule_id = ?
+                ORDER BY occurrence.due_at DESC LIMIT 1
+                """,
+                (schedule["id"],),
+            ).fetchone()
+            latest_brief = connection.execute(
+                """
+                SELECT occurrence.task_id, occurrence.due_at, artifact.name
+                FROM schedule_occurrences AS occurrence
+                JOIN artifact_revisions AS artifact ON artifact.task_id = occurrence.task_id
+                JOIN turns AS turn ON turn.id = artifact.turn_id AND turn.status = 'completed'
+                WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
+                ORDER BY occurrence.due_at DESC, turn.id DESC, artifact.name LIMIT 1
+                """,
+                (schedule["id"],),
+            ).fetchone()
+            return {
+                **dict(schedule),
+                "latest_run": dict(latest_run) if latest_run else None,
+                "latest_brief": dict(latest_brief) if latest_brief else None,
+            }
+
+    def stop_schedule(self, schedule_id: int, *, now: datetime) -> None:
+        stopped_at = self._schedule_epoch(now)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT stopped_at FROM weekly_schedules WHERE id = ?", (schedule_id,)).fetchone()
+            if row is None:
+                raise KeyError(schedule_id)
+            if row["stopped_at"] is not None:
+                raise ValueError("This weekly responsibility was already stopped.")
+            connection.execute("UPDATE weekly_schedules SET stopped_at = ? WHERE id = ?", (stopped_at, schedule_id))
+
+    def enqueue_due_schedule(self, *, now: datetime) -> str | None:
+        now_epoch = self._schedule_epoch(now)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            schedule = connection.execute(
+                "SELECT * FROM weekly_schedules WHERE stopped_at IS NULL AND next_run_at <= ?",
+                (now_epoch,),
+            ).fetchone()
+            if schedule is None:
+                return None
+            at = parse_schedule_time(schedule["local_time"])
+            due_at = latest_occurrence(schedule["weekday"], at, now)
+            next_run_at = next_occurrence(schedule["weekday"], at, now)
+            task_id = uuid.uuid4().hex
+            self._insert_task(connection, task_id, scheduled_request(schedule["request"], due_at, now))
+            connection.execute(
+                "INSERT INTO schedule_occurrences (schedule_id, due_at, task_id) VALUES (?, ?, ?)",
+                (schedule["id"], due_at, task_id),
+            )
+            connection.execute(
+                "UPDATE weekly_schedules SET next_run_at = ? WHERE id = ?",
+                (next_run_at, schedule["id"]),
+            )
+            return task_id
+
+    def _schedule_epoch(self, now: datetime) -> int:
+        if now.utcoffset() is None:
+            raise ValueError("Schedule time must include a time zone.")
+        return int(now.timestamp())
 
     def list_tasks(self) -> list[dict]:
         with self._connection() as connection:
