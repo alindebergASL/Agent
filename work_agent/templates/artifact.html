@@ -2,15 +2,45 @@
 {% block title %}{{ name }} · Work Agent{% endblock %}
 {% block body %}
 <a class="back" href="{{ url_for('assignment', task_id=task_id) }}">← Assignment</a>
-<section class="panel">
+<section class="panel" data-artifact-revision="{{ saved.revision }}" data-artifact-author="{{ saved.author }}">
   <div class="heading">
     <h1>{{ name }}</h1>
-    <a class="download" href="?download=1">Download</a>
+    <a class="download" href="?{% if historical %}revision={{ saved.revision }}&amp;{% endif %}download=1">Download</a>
   </div>
+  <p class="help">Revision {{ saved.revision }} · {% if saved.author == "user" %}User edit{% else %}Agent{% endif %}</p>
+  {% if historical %}<p><a href="{{ url_for('artifact', task_id=task_id, name=name) }}">Current revision</a></p>{% endif %}
   {% if markdown_html is not none %}
   <div class="artifact-markdown">{{ markdown_html | safe }}</div>
   {% else %}
   <pre>{{ content }}</pre>
   {% endif %}
+</section>
+{% if markdown_html is not none and not historical %}
+<section class="panel">
+  <h2>Edit Markdown</h2>
+  {% if form_error %}<p class="notice" role="alert">{{ form_error }}</p>{% endif %}
+  <form action="{{ url_for('edit_artifact', task_id=task_id, name=name) }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="expected_revision" value="{{ saved.revision }}">
+    <label for="markdown-content">Markdown content</label>
+    <textarea id="markdown-content" name="content" rows="12">
+{{ draft }}</textarea>
+    <button type="submit">Save edit</button>
+  </form>
+</section>
+{% endif %}
+<section class="panel">
+  <h2>Revision history</h2>
+  <ul class="entries">
+    {% for revision in revisions %}
+    <li>
+      {% if revision.revision == saved.revision %}
+      <span aria-current="page">Revision {{ revision.revision }}</span>
+      {% else %}
+      <a href="?revision={{ revision.revision }}">Revision {{ revision.revision }}</a>
+      {% endif %}
+      <span>{% if revision.author == "user" %}User edit{% else %}Agent{% endif %}</span>
+    </li>
+    {% endfor %}
+  </ul>
 </section>
 {% endblock %}
