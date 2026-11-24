@@ -1,6 +1,6 @@
 # Retain a verified recovery method
 
-When the agent repairs an import and verifies the result, it can stage one reusable method for the turn. The method records its scope, procedure, and evidence. The runner checks that the model has already received reads of the source and attempted import, the cited calculator results, and the corrected artifact receipt. The model decides whether those observations support a recovery.
+This first recovery tool covers numeric import audits. To stage a reusable method, the model must cite reads from at least two distinct uploads, at least one calculator result, and a corrected artifact it has already staged. The runner checks that those receipts were in the model input for the staging request. The model judges whether they establish a recovery and describes the evidence. The two-upload and calculator requirements currently limit which recoveries it can save.
 
 The app publishes the method with the corrected artifacts in the same SQLite transaction. Stop, correction, failure, and interruption discard the draft. The existing Saved methods page lets the user inspect the evidence and source assignment, edit the method, or remove it. A later run can retrieve the scope and procedure through `read_method`.
 
@@ -28,6 +28,8 @@ After container recreation with the same volume, the method and source assignmen
 |---|---:|---:|---|
 | `000582` | $162.60 | $165.90 | Alder Works by $3.30 |
 | `582` | $133.40 | $116.50 | Beacon Metals by $16.90 |
-| Combined order | $296.00 | $282.40 | Beacon Metals by $13.60 |
+| Combined if quoted freight charges are additive | $296.00 | $282.40 | Beacon Metals by $13.60 |
 
-Each total was independently calculated from six units and the quoted freight for two shipments on one order. The demo repaired a comparison from fixture files. Verification of an external receiving-system import was outside the demonstrated workflow.
+Each line total uses six units and the freight terms on that quote row. The combined comparison adds the two line totals for each supplier. For example, it counts both of Beacon’s per-order charges ($13.50 and $9.10). The quotes leave the freight terms for a single order containing both parts unspecified. The $13.60 advantage depends on that assumption.
+
+The first live request explicitly asked the agent to save a method if it verified a repair. The fresh request asked only for a comparison. The demonstration established agent-authored saving and unprompted retrieval using the uploaded fixture files.
