@@ -121,6 +121,38 @@ class SchedulingTests(unittest.TestCase):
             time.sleep(0.025)
         self.fail(f"No completed brief: {state}")
 
+    def test_dashboard_keeps_original_brief_files_after_followup_and_failed_next_run(self):
+        store = self.friday_schedule()
+        first = store.enqueue_due_schedule(now=FRIDAY_PDT + timedelta(days=1))
+        self.assertEqual(store.claim(), first)
+        original_turn = store.get_task(first)["turns"][-1]["id"]
+        store.correct_turn(first, original_turn, "Save the brief and an appendix.")
+        self.assertEqual(store.claim(), first)
+        store.stage(first, "weekly-brief.md", "# Brief")
+        store.stage(first, "appendix.md", "# Appendix")
+        store.complete(first, "Saved both documents.")
+        store.follow_up(first, "Update the brief and save action items separately.")
+        self.assertEqual(store.claim(), first)
+        store.stage(first, "weekly-brief.md", "# Updated brief")
+        store.stage(first, "actions.md", "# Action items")
+        store.complete(first, "Updated the brief.")
+
+        next_task = store.enqueue_due_schedule(now=FRIDAY_PST)
+        expected = {"task_id": first, "due_at": int(FRIDAY_PDT.timestamp()), "names": ["appendix.md", "weekly-brief.md"]}
+        self.assertEqual(store.get_schedule()["latest_brief"], expected)
+        self.assertEqual(store.claim(), next_task)
+        store.fail(next_task, "Research unavailable.")
+        self.assertEqual(store.get_schedule()["latest_brief"], expected)
+
+        with TestClient(create_app(data_dir=self.data, model=BriefModel(), clock=lambda: FRIDAY_PST)) as client:
+            page = client.get("/responsibility").text
+            self.assertIn(f"Scheduled for <time data-latest-brief-at=\"{int(FRIDAY_PDT.timestamp())}\"", page)
+            for name in expected["names"]:
+                self.assertIn(f'/tasks/{first}/artifacts/{name}">{name}</a>', page)
+            self.assertNotIn("actions.md", page)
+            latest = client.get(f"/tasks/{first}/artifacts/weekly-brief.md?download=1")
+            self.assertEqual(latest.text, "# Updated brief")
+
     def test_responsibility_dashboard_reopens_a_dated_brief_after_restart(self):
         model = BriefModel()
         with TestClient(create_app(data_dir=self.data, model=model, clock=lambda: THURSDAY)) as client:
@@ -142,8 +174,8 @@ class SchedulingTests(unittest.TestCase):
             self.assertEqual(schedule["latest_run"]["status"], "completed")
             brief = schedule["latest_brief"]
             self.assertEqual(brief["due_at"], int(FRIDAY_PDT.timestamp()))
-            self.assertEqual(brief["name"], "meeting-brief-2026-10-30.md")
-            artifact = f"/tasks/{brief['task_id']}/artifacts/{brief['name']}"
+            self.assertEqual(brief["names"], ["meeting-brief-2026-10-30.md"])
+            artifact = f"/tasks/{brief['task_id']}/artifacts/{brief['names'][0]}"
             dashboard = client.get("/responsibility")
             self.assertIn("Open latest brief", dashboard.text)
             self.assertIn("Open latest assignment", dashboard.text)

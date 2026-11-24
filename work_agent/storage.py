@@ -313,21 +313,33 @@ class Store:
                 """,
                 (schedule["id"],),
             ).fetchone()
-            latest_brief = connection.execute(
+            brief_files = connection.execute(
                 """
-                SELECT occurrence.task_id, occurrence.due_at, artifact.name
-                FROM schedule_occurrences AS occurrence
-                JOIN artifact_revisions AS artifact ON artifact.task_id = occurrence.task_id
-                JOIN turns AS turn ON turn.id = artifact.turn_id AND turn.status = 'completed'
-                WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
-                ORDER BY occurrence.due_at DESC, turn.id DESC, artifact.name LIMIT 1
+                WITH brief_turn AS (
+                    SELECT occurrence.task_id, occurrence.due_at, turn.id AS turn_id
+                    FROM schedule_occurrences AS occurrence
+                    JOIN turns AS turn ON turn.task_id = occurrence.task_id AND turn.status = 'completed'
+                    JOIN artifact_revisions AS artifact ON artifact.turn_id = turn.id
+                    WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
+                    ORDER BY occurrence.due_at DESC, turn.id ASC LIMIT 1
+                )
+                SELECT brief_turn.task_id, brief_turn.due_at, artifact.name
+                FROM brief_turn JOIN artifact_revisions AS artifact USING (task_id, turn_id)
+                WHERE artifact.name LIKE '%.md' ORDER BY artifact.name
                 """,
                 (schedule["id"],),
-            ).fetchone()
+            ).fetchall()
+            latest_brief = None
+            if brief_files:
+                latest_brief = {
+                    "task_id": brief_files[0]["task_id"],
+                    "due_at": brief_files[0]["due_at"],
+                    "names": [row["name"] for row in brief_files],
+                }
             return {
                 **dict(schedule),
                 "latest_run": dict(latest_run) if latest_run else None,
-                "latest_brief": dict(latest_brief) if latest_brief else None,
+                "latest_brief": latest_brief,
             }
 
     def stop_schedule(self, schedule_id: int, *, now: datetime) -> None:

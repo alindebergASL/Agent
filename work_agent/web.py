@@ -6,6 +6,7 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
+import sqlite3
 from threading import Event, Lock, Thread
 from typing import Annotated
 from urllib.parse import quote, urlsplit
@@ -37,8 +38,15 @@ logger = logging.getLogger(__name__)
 def work_pending(store, model, wake, stop, turn_lock, clock):
     while not stop.is_set():
         wake.clear()
-        store.enqueue_due_schedule(now=clock())
-        task_id = store.claim()
+        try:
+            store.enqueue_due_schedule(now=clock())
+            task_id = store.claim()
+        except sqlite3.OperationalError as exc:
+            # SQLite's low byte is the primary result code for extended errors too.
+            if getattr(exc, "sqlite_errorcode", 0) & 0xff != sqlite3.SQLITE_BUSY:
+                raise
+            logger.warning("Database busy while polling for work. Retrying.")
+            task_id = None
         if task_id is None:
             wake.wait(timeout=1)
             continue

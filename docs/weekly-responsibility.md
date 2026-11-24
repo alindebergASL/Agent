@@ -4,6 +4,8 @@ Use the existing worker and SQLite volume to run one active weekly responsibilit
 
 The worker queues a regular assignment and advances the schedule in one SQLite transaction. A scheduled occurrence has its own durable key. When multiple weeks were missed, the app queues the most recent due occurrence once and moves the next run to the next scheduled local time. A pending assignment uses the normal worker queue. Stopping the schedule leaves its runs and saved files available.
 
+On catch-up, the dashboard shows when the occurrence was scheduled. The assignment uses the Pacific date when it was queued to interpret “the past week.” The dashboard links to the Markdown files from the first completed turn that produced them for that occurrence. Those links open the current revisions, including later edits. If the next run is pending or fails, the previous brief remains available.
+
 ## Reproduce
 
 Open **Weekly responsibility**, select Friday and 9:00 a.m. Pacific, and save this request.
