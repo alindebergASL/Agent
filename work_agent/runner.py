@@ -83,6 +83,7 @@ TOOLS = [
 
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
 PROGRAM_TOOLS = {"read_file"}
+MAX_TOOL_CALLS = 48
 RESPONSES_TOOLS = [
     *(
         {**tool, "allowed_callers": ["direct", "programmatic"]}
@@ -112,7 +113,14 @@ class OpenAIModel:
         )
         self.model = model
 
-    def respond(self, input: list[dict], tools: list[dict], instructions: str) -> dict:
+    def respond(
+        self, input: list[dict], tools: list[dict], instructions: str, *, max_tool_calls: int
+    ) -> dict:
+        # The provider limit applies to hosted tools. Keep their definitions available
+        # for replay when a final response must be generated without new calls.
+        tool_limits = (
+            {"max_tool_calls": max_tool_calls} if max_tool_calls else {"tool_choice": "none"}
+        )
         try:
             response = self.client.responses.create(
                 model=self.model,
@@ -122,6 +130,7 @@ class OpenAIModel:
                 store=False,
                 include=["reasoning.encrypted_content", "web_search_call.action.sources"],
                 max_output_tokens=8192,
+                **tool_limits,
             )
         except APIError as exc:
             if getattr(exc, "status_code", None) in (401, 403):
@@ -236,12 +245,14 @@ def run_assignment(
         }
     ]
     deadline = time.monotonic() + 240
-    tool_calls = 0
+    remaining_calls = MAX_TOOL_CALLS
     for _ in range(16):
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
         progress("Waiting for the model.")
-        response = model.respond(history, RESPONSES_TOOLS, INSTRUCTIONS)
+        response = model.respond(
+            history, RESPONSES_TOOLS, INSTRUCTIONS, max_tool_calls=remaining_calls
+        )
         record({"type": "response", "response": response})
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
@@ -258,25 +269,36 @@ def run_assignment(
             if observation["type"] == "web_search_call":
                 action = observation["action"]
                 progress(f"Web research: {action['type'].replace('_', ' ')}.")
+        final_content = [
+            part
+            for item in output
+            if item["type"] == "message" and item.get("phase") != "commentary"
+            for part in item.get("content", [])
+        ]
+        refusals = [part["refusal"] for part in final_content if part["type"] == "refusal"]
+        if refusals:
+            raise AssignmentError("\n".join(refusals).strip() or "The model declined the assignment.")
+
         calls = [item for item in output if item["type"] == "function_call"]
+        hosted_calls = sum(item["type"] == "web_search_call" for item in output)
+        remaining_calls -= len(calls) + hosted_calls
+        if remaining_calls < 0:
+            raise AssignmentError("The assignment reached its tool call limit.")
+
         if not calls:
             answer = "\n".join(
-                part["text"]
-                for item in output
-                if item["type"] == "message"
-                and item.get("phase") != "commentary"
-                for part in item.get("content", [])
-                if part["type"] == "output_text"
+                part["text"] for part in final_content if part["type"] == "output_text"
             ).strip()
             if answer:
                 return answer
-            if any(item["type"] in {"program", "program_output", "web_search_call"} for item in output):
+            if any(
+                item["type"] in {"reasoning", "program", "program_output", "web_search_call"}
+                or (item["type"] == "message" and item.get("phase") == "commentary")
+                for item in output
+            ):
                 continue
             raise AssignmentError("The model returned no final response.")
 
-        tool_calls += len(calls)
-        if tool_calls > 48:
-            raise AssignmentError("The assignment reached its tool call limit.")
         for call in calls:
             if not call.get("call_id"):
                 raise AssignmentError("The model returned a tool call without an ID.")

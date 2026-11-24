@@ -16,7 +16,7 @@ from work_agent.web import create_app
 class InventoryModel:
     """Exercise the same tools with a different input, request, and output."""
 
-    def respond(self, input, tools, instructions):
+    def respond(self, input, tools, instructions, *, max_tool_calls):
         outputs = tool_outputs(input)
         if "write" in outputs:
             if outputs["write"].get("staged") != "inventory.md":
@@ -39,7 +39,7 @@ class InventoryModel:
 
 
 class FailingModel:
-    def respond(self, input, tools, instructions):
+    def respond(self, input, tools, instructions, *, max_tool_calls):
         outputs = tool_outputs(input)
         if outputs:
             if outputs["write"].get("staged") != "partial.md":

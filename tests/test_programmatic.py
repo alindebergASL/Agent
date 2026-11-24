@@ -45,7 +45,7 @@ class ProgrammaticTests(unittest.TestCase):
         ))
         histories = []
 
-        def respond(history, tools, instructions):
+        def respond(history, tools, instructions, *, max_tool_calls):
             histories.append(deepcopy(history))
             self.assertIn({"type": "programmatic_tool_calling"}, tools)
             read_tool = next(tool for tool in tools if tool.get("name") == "read_file")
