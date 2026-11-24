@@ -38,3 +38,9 @@ a { color: var(--accent); text-underline-offset: .18em; }
 .back { display: inline-block; margin: 0 0 .8rem; }
 pre { margin-bottom: 0; padding: .9rem; background: var(--paper); border-radius: .4rem; overflow: auto; font: .9rem/1.55 ui-monospace, monospace; }
 li + li { margin-top: .2rem; }
+.turn { margin: 1rem 0; }
+.turn + .turn { border-top: 1px solid var(--line); padding-top: 1rem; }
+.source-lines { list-style: none; padding: .75rem 0; background: var(--paper); overflow-x: auto; }
+.source-lines li { display: grid; grid-template-columns: 7ch minmax(max-content, 1fr); gap: .75rem; margin: 0; padding-inline: .75rem; }
+.source-lines li:target { background: #e0e9df; }
+.source-lines code { white-space: pre; }

@@ -37,6 +37,12 @@ Compose mounts the `agent-data` volume at `/data` for the assignment database, i
 
 Open **Run history (JSON)** from a task's Activity section to inspect its saved Responses items and tool receipts. Hosted calls share a program ID, and Activity shows the file and line range each program read. The history can include uploaded text returned by a tool, so review it before sharing.
 
+### Continue a completed assignment
+
+Open the saved recommendation, choose **Edit Markdown**, and save your changes. Return to the assignment and submit a follow-up. The app reuses the original uploads and conversation. The existing file links open the latest saved revision, and the revision list lets you reopen earlier versions. Markdown source links open the numbered rows of the original uploads.
+
+The agent reads the saved revisions that were current when its turn started. If you edit one of the files it is replacing before it finishes, the app keeps your edit and leaves that turn’s draft outputs unpublished. Submit a follow-up to retry against the saved revisions.
+
 The quote demonstration can also run against the offline Responses fixture. Use a separate Compose project so its saved assignments and model configuration stay separate from live runs.
 
 ```bash

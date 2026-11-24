@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 
@@ -35,8 +36,8 @@ class ArtifactPreviewTests(unittest.TestCase):
         self.client = TestClient(create_app(data_dir=directory))
         self.addCleanup(self.client.close)
 
-    def publish(self, name, content):
-        task_id = self.store.submit("Publish an artifact.", {})
+    def publish(self, name, content, uploads=None):
+        task_id = self.store.submit("Publish an artifact.", uploads or {})
         self.assertEqual(self.store.claim(), task_id)
         self.store.stage(task_id, name, content)
         self.store.complete(task_id, "Saved.")
@@ -91,6 +92,36 @@ class ArtifactPreviewTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", response.text)
         self.assertIn("Raw markup&lt;/a&gt;", response.text)
         self.assertIn("External image", response.text)
+
+    def test_upload_row_citations_link_only_to_scoped_sources(self):
+        name = "q uôte.csv"
+        encoded = quote(name, safe="")
+        citation = f"../uploads/{encoded}#L2"
+        markdown = (
+            f"[Original row]({citation})\n"
+            "[Traversal](../uploads/%2e%2e#L2)\n"
+            "[Encoded path](../uploads/file%2Fwrong.csv#L2)\n"
+            "[Backslash](../uploads/file%5Cwrong.csv#L2)\n"
+            "[Relative download](../uploads/source.csv?download=1#L2)\n"
+            "[Wrong path](../../uploads/source.csv#L2)\n"
+            "[Wrong line](../uploads/source.csv#L0)\n"
+        )
+        original = b"column\r\n<script>row</script>\r\n"
+        url = self.publish("brief.md", markdown, uploads={name: original})
+        markup = PreviewMarkup(self.client.get(url).text)
+        relative_links = [
+            attrs["href"] for tag, attrs in markup.elements
+            if tag == "a" and attrs.get("href", "").startswith("../")
+        ]
+        self.assertEqual(relative_links, [citation])
+
+        source = f"{url.rsplit('/artifacts/', 1)[0]}/uploads/{encoded}"
+        preview = self.client.get(source)
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn('id="L2"', preview.text)
+        self.assertIn("&lt;script&gt;row&lt;/script&gt;", preview.text)
+        self.assertNotIn("<script>", preview.text)
+        self.assertEqual(self.client.get(source, params={"download": 1}).content, original)
 
     def test_csv_stays_plain_escaped_text(self):
         csv = "value\n[Text](https://example.org/)\n<script>inert</script>\n"
