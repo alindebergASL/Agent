@@ -53,6 +53,23 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
 )
 """
 
+# Exactly one foreign key applies: a published revision, or the immutable upload
+# in the original task. Both share the existing citation ID namespace.
+PRIOR_ARTIFACTS_TABLE = """
+CREATE TABLE IF NOT EXISTS prior_artifacts (
+    reference_id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    source_task_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    revision INTEGER,
+    upload_task_id TEXT GENERATED ALWAYS AS (CASE WHEN revision IS NULL THEN source_task_id END) VIRTUAL,
+    FOREIGN KEY (source_task_id, name, revision) REFERENCES artifact_revisions(task_id, name, revision),
+    FOREIGN KEY (upload_task_id, name) REFERENCES uploads(task_id, name),
+    UNIQUE (task_id, source_task_id, name, revision),
+    UNIQUE (task_id, upload_task_id, name)
+)
+"""
+
 SCHEMA = TASKS_TABLE.format(table="tasks") + TURNS_TABLE.format(table="turns") + """
 CREATE TABLE IF NOT EXISTS uploads (
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -92,15 +109,6 @@ CREATE TABLE IF NOT EXISTS turn_artifacts (
     revision INTEGER NOT NULL,
     PRIMARY KEY (turn_id, name)
 );
-CREATE TABLE IF NOT EXISTS prior_artifacts (
-    reference_id INTEGER PRIMARY KEY,
-    task_id TEXT NOT NULL REFERENCES tasks(id),
-    source_task_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    FOREIGN KEY (source_task_id, name, revision) REFERENCES artifact_revisions(task_id, name, revision),
-    UNIQUE (task_id, source_task_id, name, revision)
-);
 CREATE TABLE IF NOT EXISTS staged_artifacts (
     turn_id INTEGER NOT NULL REFERENCES turns(id),
     name TEXT NOT NULL,
@@ -134,7 +142,7 @@ CREATE TABLE IF NOT EXISTS weekly_schedules (
     stopped_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_schedule ON weekly_schedules(1) WHERE stopped_at IS NULL;
-""" + SCHEDULE_OCCURRENCES_TABLE + ";"
+""" + SCHEDULE_OCCURRENCES_TABLE + ";" + PRIOR_ARTIFACTS_TABLE + ";"
 
 
 class RevisionConflict(RuntimeError):
@@ -211,6 +219,15 @@ class Store:
                 ON schedule_occurrences (schedule_id, due_at) WHERE manual = 0"""
             )
             self._migrate_tasks(connection)
+            prior_columns = connection.execute("PRAGMA table_info(prior_artifacts)")
+            if any(col["name"] == "revision" and col["notnull"] for col in prior_columns):
+                connection.execute("ALTER TABLE prior_artifacts RENAME TO prior_artifacts_legacy")
+                connection.execute(PRIOR_ARTIFACTS_TABLE)
+                connection.execute(
+                    """INSERT INTO prior_artifacts (reference_id, task_id, source_task_id, name, revision)
+                       SELECT reference_id, task_id, source_task_id, name, revision FROM prior_artifacts_legacy"""
+                )
+                connection.execute("DROP TABLE prior_artifacts_legacy")
             self._initialize_saved_work_search(connection)
             connection.execute(
                 "UPDATE turns SET status = 'interrupted', error = ? WHERE status = 'running'",
@@ -230,25 +247,34 @@ class Store:
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _initialize_saved_work_search(self, connection: sqlite3.Connection) -> None:
-        if connection.execute("SELECT 1 FROM sqlite_schema WHERE name = 'saved_work_search'").fetchone():
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(saved_work_search)")}
+        if "kind" in columns:
             return
+        connection.execute("DROP TRIGGER IF EXISTS index_published_artifact")
+        connection.execute("DROP TRIGGER IF EXISTS index_original_upload")
+        connection.execute("DROP TABLE IF EXISTS saved_work_search")
         connection.execute(
             """CREATE VIRTUAL TABLE saved_work_search USING fts5(
-                source_task_id UNINDEXED, name, request, tokenize='unicode61 remove_diacritics 2')"""
+                source_task_id UNINDEXED, name, request, kind UNINDEXED, tokenize='unicode61 remove_diacritics 2')"""
         )
-        # Assignment requests and first publications are immutable. Index each file once,
-        # including the turn that introduced it when it differs from the original request.
-        select_metadata = """SELECT saved.task_id, saved.name,
-                CASE WHEN turn.request IS NOT NULL AND turn.request != task.request
-                     THEN task.request || char(10) || turn.request ELSE task.request END
-            FROM artifact_revisions AS saved JOIN tasks AS task ON task.id = saved.task_id
-            LEFT JOIN turns AS turn ON turn.id = saved.turn_id WHERE saved.revision = 1"""
-        connection.execute("INSERT INTO saved_work_search " + select_metadata)
-        connection.execute(
-            """CREATE TRIGGER index_published_artifact AFTER INSERT ON artifact_revisions
-            WHEN NEW.revision = 1 BEGIN INSERT INTO saved_work_search """
-            + select_metadata + " AND saved.task_id = NEW.task_id AND saved.name = NEW.name; END"
-        )
+        # Backfill once, then index new files in the same transaction as submission
+        # or publication. Contents and later edits never enter this metadata index.
+        for table, kind, trigger, predicate in (
+            ("artifact_revisions", "artifact", "index_published_artifact", "saved.revision = 1"),
+            ("uploads", "upload", "index_original_upload", "1"),
+        ):
+            insert = f"""INSERT INTO saved_work_search (source_task_id, name, request, kind)
+                SELECT saved.task_id, saved.name,
+                    CASE WHEN turn.request IS NOT NULL AND turn.request != task.request
+                         THEN task.request || char(10) || turn.request ELSE task.request END, '{kind}'
+                FROM {table} AS saved JOIN tasks AS task ON task.id = saved.task_id
+                LEFT JOIN turns AS turn ON turn.id = saved.turn_id WHERE {predicate}"""
+            connection.execute(insert)
+            when = "WHEN NEW.revision = 1" if kind == "artifact" else ""
+            connection.execute(
+                f"CREATE TRIGGER {trigger} AFTER INSERT ON {table} {when} BEGIN "
+                + insert + " AND saved.task_id = NEW.task_id AND saved.name = NEW.name; END"
+            )
 
     def _upgrade_turn_schema(self, connection: sqlite3.Connection) -> None:
         existing = {row["name"] for row in connection.execute(
@@ -313,7 +339,7 @@ class Store:
                         )
 
     def submit(
-        self, request: str, uploads: dict[str, bytes], *, prior_revision: tuple[str, str, int] | None = None
+        self, request: str, uploads: dict[str, bytes], *, prior_revision: tuple[str, str, int | None] | None = None
     ) -> str:
         task_id = uuid.uuid4().hex
         with self._connection() as connection:
@@ -428,8 +454,10 @@ class Store:
             )
 
     def _prior_artifacts(self, connection, task_id: str, reference_id: int | None = None) -> list[dict]:
-        query = """SELECT pin.reference_id, pin.source_task_id, pin.name, pin.revision, saved.author
-            FROM prior_artifacts AS pin JOIN artifact_revisions AS saved
+        query = """SELECT pin.reference_id, pin.source_task_id, pin.name, pin.revision,
+                   CASE WHEN pin.revision IS NULL THEN 'upload' ELSE 'artifact' END AS kind,
+                   COALESCE(saved.author, 'user') AS author
+            FROM prior_artifacts AS pin LEFT JOIN artifact_revisions AS saved
                 ON saved.task_id = pin.source_task_id AND saved.name = pin.name AND saved.revision = pin.revision
             WHERE pin.task_id = ?"""
         if reference_id is None:
@@ -445,52 +473,72 @@ class Store:
             rows = self._prior_artifacts(connection, task_id, reference_id)
             return rows[0] if rows else None
 
-    def search_saved_work(self, task_id: str, query: str) -> list[dict]:
+    def search_saved_work(self, task_id: str, query: str, kind: str = "any") -> list[dict]:
+        if kind not in ("any", "upload", "artifact"):
+            raise ValueError("Choose upload, artifact, or any as the file kind.")
         if not isinstance(query, str) or len(query) > 200:
             raise ValueError("Search with up to 200 characters of keywords or a filename.")
         terms = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", query))
         if not terms:
-            raise ValueError("Search with a keyword or filename containing letters or numbers.")
+            # Valid upload names may consist entirely of symbols, which FTS does not tokenize.
+            with self._connection() as connection:
+                rows = connection.execute(
+                    """SELECT hit.source_task_id, hit.name, hit.kind, NULL AS revision,
+                           substr(hit.request, 1, 240) AS request, task.created_at
+                       FROM saved_work_search AS hit JOIN tasks AS task ON task.id = hit.source_task_id
+                       WHERE hit.name = ? AND hit.source_task_id != ? AND hit.kind = 'upload'
+                           AND ? IN ('any', 'upload')
+                       ORDER BY task.created_at DESC, task.rowid DESC LIMIT 8""",
+                    (query, task_id, kind),
+                ).fetchall()
+            if rows:
+                return [dict(row) for row in rows]
+            raise ValueError("Search with a keyword or exact filename.")
         # Treat punctuation and FTS operators as user input. Every term must match.
         match = " AND ".join(f'"{term}"' for term in dict.fromkeys(terms))
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT hit.source_task_id, hit.name,
-                       (SELECT MAX(revision) FROM artifact_revisions
-                        WHERE task_id = hit.source_task_id AND name = hit.name) AS revision,
+                """SELECT hit.source_task_id, hit.name, hit.kind,
+                       CASE WHEN hit.kind = 'artifact' THEN (SELECT MAX(revision) FROM artifact_revisions
+                        WHERE task_id = hit.source_task_id AND name = hit.name) END AS revision,
                        substr(snippet(saved_work_search, 2, '', '', ' … ', 28), 1, 240) AS request,
                        task.created_at
                    FROM saved_work_search AS hit JOIN tasks AS task ON task.id = hit.source_task_id
                    WHERE saved_work_search MATCH ? AND hit.source_task_id != ?
+                         AND (? = 'any' OR hit.kind = ?)
                    ORDER BY (hit.name = ? COLLATE NOCASE) DESC, bm25(saved_work_search, 0, 4, 1),
-                            task.created_at DESC, task.rowid DESC, hit.name LIMIT 8""",
-                (match, task_id, query.strip()),
+                            task.created_at DESC, task.rowid DESC, hit.name, hit.kind LIMIT 8""",
+                (match, task_id, kind, kind, query.strip()),
             )
             return [dict(row) for row in rows]
 
-    def _pin_saved_work(self, connection, task_id: str, source_task_id: str, name: str, revision: int) -> dict:
-        if (not isinstance(source_task_id, str) or task_id == source_task_id
-                or not isinstance(name, str) or not ARTIFACT_NAME.fullmatch(name)
-                or type(revision) is not int or not 0 < revision <= 2**63 - 1):
+    def _pin_saved_work(self, connection, task_id: str, source_task_id: str, name: str, revision: int | None) -> dict:
+        if not isinstance(source_task_id, str) or task_id == source_task_id or not isinstance(name, str):
+            raise ValueError("Choose a file from another assignment.")
+        if revision is None:
+            source = "SELECT task_id, name, NULL FROM uploads WHERE task_id = ? AND name = ?"
+            source_args = (source_task_id, name)
+        elif type(revision) is int and 0 < revision <= 2**63 - 1 and ARTIFACT_NAME.fullmatch(name):
+            source = "SELECT task_id, name, revision FROM artifact_revisions WHERE task_id = ? AND name = ? AND revision = ?"
+            source_args = (source_task_id, name, revision)
+        else:
             raise ValueError("Choose a published revision from another assignment.")
         connection.execute(
-            """INSERT INTO prior_artifacts (task_id, source_task_id, name, revision)
-               SELECT consumer.id, saved.task_id, saved.name, saved.revision
-               FROM artifact_revisions AS saved JOIN tasks AS consumer ON consumer.id = ?
-               WHERE saved.task_id = ? AND saved.name = ? AND saved.revision = ?
-               ON CONFLICT(task_id, source_task_id, name, revision) DO NOTHING""",
-            (task_id, source_task_id, name, revision),
+            f"""INSERT INTO prior_artifacts (task_id, source_task_id, name, revision)
+                SELECT consumer.id, source.* FROM ({source}) AS source
+                JOIN tasks AS consumer ON consumer.id = ? WHERE TRUE ON CONFLICT DO NOTHING""",
+            (*source_args, task_id),
         )
         pin = connection.execute(
             """SELECT reference_id FROM prior_artifacts
-               WHERE task_id = ? AND source_task_id = ? AND name = ? AND revision = ?""",
+               WHERE task_id = ? AND source_task_id = ? AND name = ? AND revision IS ?""",
             (task_id, source_task_id, name, revision),
         ).fetchone()
         if pin is None:
             raise ValueError("Choose a published revision from another assignment.")
         return self._prior_artifacts(connection, task_id, pin["reference_id"])[0]
 
-    def pin_saved_work(self, task_id: str, source_task_id: str, name: str, revision: int) -> dict:
+    def pin_saved_work(self, task_id: str, source_task_id: str, name: str, revision: int | None) -> dict:
         with self._connection() as connection:
             return self._pin_saved_work(connection, task_id, source_task_id, name, revision)
 
@@ -498,6 +546,8 @@ class Store:
         pin = self.prior_artifact(task_id, reference_id)
         if pin is None:
             return None
+        if pin["kind"] == "upload":
+            return self.read_upload(pin["source_task_id"], pin["name"])
         saved = self.artifact_revision(pin["source_task_id"], pin["name"], pin["revision"])
         return saved["content"] if saved else None
 

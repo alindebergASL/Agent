@@ -29,7 +29,7 @@ class SavedWorkRunnerTests(unittest.TestCase):
         ])
         results = tool_outputs(trace)
         candidates = results["find"]["candidates"]
-        self.assertEqual(candidates, [{"candidate_id": 1, "name": "purchases.csv", "revision": 4,
+        self.assertEqual(candidates, [{"candidate_id": 1, "kind": "artifact", "name": "purchases.csv", "revision": 4,
                                       "request": "Prepare a purchases CSV", "created_at": "2026-11-25T14:00:00Z"}])
         self.assertEqual(results["again"]["candidates"], candidates)
         self.assertEqual([c.args for c in search.call_args_list], [("purchases",), ("purchases.csv",)])
@@ -41,6 +41,43 @@ class SavedWorkRunnerTests(unittest.TestCase):
         tools = {tool.get("name"): tool for tool in model.respond.call_args.args[1]}
         for name in ("search_saved_work", "open_saved_work", "read_prior_artifact"):
             self.assertEqual(tools[name]["allowed_callers"], ["direct", "programmatic"])
+
+    def test_original_and_artifact_with_same_name_are_separate_readable_candidates(self):
+        metadata = {"name": "quote.csv", "source_task_id": "quotes", "request": "Compare quotes",
+                    "created_at": "2026-11-25T14:00:00Z"}
+        source = {**metadata, "kind": "upload", "revision": None}
+        search = Mock(return_value=[{**metadata, "kind": "artifact", "revision": 1}, source])
+        pin = Mock(return_value={**source, "reference_id": 9})
+        reader = Mock(return_value=b"item,quoted_price\r\n000731,13.50\r\n")
+        model = Mock()
+        model.respond.side_effect = [
+            response(call("search", "search_saved_work", query="quote.csv")),
+            response(call("source", "open_saved_work", candidate_id=2)),
+            response({**read("row", reference_id=9, start_line=2, line_count=1), "caller": HOSTED}),
+            response(answer("Read the original.")),
+        ]
+        trace = []
+        run_assignment(model, "Find the original quote", {}, Mock(), Mock(), trace.append,
+                       search_saved_work=search, pin_saved_work=pin, read_prior_artifact=reader)
+        result = tool_outputs(trace)
+        self.assertEqual([(c["candidate_id"], c["kind"]) for c in result["search"]["candidates"]],
+                         [(1, "artifact"), (2, "upload")])
+        pin.assert_called_once_with("quotes", "quote.csv", None)
+        reader.assert_called_once_with(9)
+        self.assertEqual(result["row"]["kind"], "upload")
+        self.assertEqual(result["row"]["revision_url"], "../prior-artifacts/9")
+        self.assertEqual(result["row"]["lines"], [{"number": 2, "text": "000731,13.50"}])
+
+    def test_kind_filter_reaches_search_before_candidates_are_ranked(self):
+        _, trace, search, _, _ = self.run_search([
+            response(call("either", "search_saved_work", query="quote", kind="any"),
+                     call("original", "search_saved_work", query="quote", kind="upload"),
+                     call("generated", "search_saved_work", query="quote", kind="artifact"),
+                     call("invalid", "search_saved_work", query="quote", kind="unknown")),
+        ])
+        self.assertEqual([c.args for c in search.call_args_list],
+                         [("quote",), ("quote", "upload"), ("quote", "artifact")])
+        self.assertIn("error", tool_outputs(trace)["invalid"])
 
     def test_only_previously_delivered_candidates_and_references_can_be_opened(self):
         _, trace, _, pin, reader = self.run_search([

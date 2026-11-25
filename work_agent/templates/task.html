@@ -41,7 +41,7 @@
   <h2>Referenced files</h2>
   <ul>
     {% for prior in task.prior_artifacts %}
-    <li><a href="{{ url_for('prior_artifact', task_id=task.id, reference_id=prior.reference_id) }}">{{ prior.name }} · Revision {{ prior.revision }}</a></li>
+    <li><a href="{{ url_for('prior_artifact', task_id=task.id, reference_id=prior.reference_id) }}">{{ prior.name }} · {% if prior.kind == 'upload' %}Original upload{% else %}Revision {{ prior.revision }}{% endif %}</a></li>
     {% endfor %}
   </ul>
   {% endif %}
