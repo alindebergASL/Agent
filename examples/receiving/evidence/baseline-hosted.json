@@ -1,0 +1,168 @@
+{
+  "assignment_id": "14955608927b4a018eb8a57e83ae2503",
+  "status": "completed",
+  "model": "gpt-6.2-sol",
+  "programs": {
+    "call_MxJvW2vr1LaWk0bnYoYp5CUF": {
+      "code": "const specs=[[\"purchase-orders.csv\",321],[\"receipts.csv\",386]];\nconst data=await Promise.all(specs.map(async ([file_id,total])=>{\n const pages=await Promise.all(Array.from({length:Math.ceil(total/100)},async (_,i)=>{\n  const end=Math.min((i+1)*100,total); let start_line=i*100+1, rows=[];\n  while(start_line<=end){const r=await tools.read_file({file_id,start_line,line_count:end-start_line+1}); if(r.file_id!==file_id||!r.lines.length||r.lines[0].number!==start_line)throw Error(\"read\");rows.push(...r.lines);start_line=r.lines.at(-1).number+1;}\n  return rows;\n }));\n const rows=pages.flat();if(rows.length!==total||rows.some((r,i)=>r.number!==i+1))throw Error(\"coverage\");\n return {file_id,total, rows:rows.slice(1).map(({number,text})=>[number,...text.split(\",\")])};\n}));\nconst [p,r]=data;const key=(po,line)=>JSON.stringify([po,line]);const map=new Map();\nfor(const [n,po,l,sku,desc,sup,due,qty] of p.rows){const k=key(po,l);if(map.has(k)||!/^\\d+$/.test(qty))throw Error(\"PO row \" + n);map.set(k,{n,po,l,sku,desc,sup,due,qty:Number(qty),rc:[]});}\nconst issues=[],ids=new Map();\nfor(const [n,id,po,l,sku,date,qty] of r.rows){const a=map.get(key(po,l));if(ids.has(id))issues.push([\"duplicate\",id,ids.get(id),n]);ids.set(id,n);if(!a||a.sku!==sku||!(/^-?\\d+$/.test(qty)))issues.push([\"receipt\",n,id,po,l,sku,qty,a?.sku]);else a.rc.push([n,Number(qty),date]);}\nconst all=[...map.values()].map(a=>({...a,received:a.rc.reduce((s,x)=>s+x[1],0)}));const short=all.filter(a=>a.qty>a.received);\ntext({coverage:data.map(({file_id,total})=>({file_id,first:1,last:total})), issues, counts:{po:all.length,receipt:r.rows.length,short:short.length,full:all.filter(a=>a.qty===a.received).length,over:all.filter(a=>a.qty<a.received).length,without:all.filter(a=>a.rc.length===0).length}, dateRange:r.rows.map(a=>a[5]).sort().filter((_,i,a)=>i===0||i===a.length-1),short:short.map(({n,po,l,sku,desc,sup,due,qty,rc,received})=>[n,po,l,sku,desc,sup,due,qty,received,qty-received,rc.map(a=>a.slice(0,2))])});\n",
+      "status": "completed",
+      "result": {
+        "coverage": [
+          {
+            "file_id": "purchase-orders.csv",
+            "first": 1,
+            "last": 321
+          },
+          {
+            "file_id": "receipts.csv",
+            "first": 1,
+            "last": 386
+          }
+        ],
+        "issues": [],
+        "counts": {
+          "po": 320,
+          "receipt": 385,
+          "short": 7,
+          "full": 313,
+          "over": 0,
+          "without": 2
+        },
+        "dateRange": [
+          "2026-10-07",
+          "2026-11-03"
+        ],
+        "short": [
+          [
+            10,
+            "000731",
+            "1",
+            "MRO-113",
+            "6002 bearing",
+            "Cascade Controls",
+            "2026-10-20",
+            47,
+            43,
+            4,
+            [
+              [
+                28,
+                14
+              ],
+              [
+                188,
+                29
+              ]
+            ]
+          ],
+          [
+            151,
+            "48074",
+            "2",
+            "MRO-110",
+            "DIN terminal",
+            "Cascade Controls",
+            "2026-10-17",
+            38,
+            31,
+            7,
+            [
+              [
+                152,
+                31
+              ]
+            ]
+          ],
+          [
+            219,
+            "48108",
+            "2",
+            "MRO-106",
+            "EPDM seal kit",
+            "Alder Industrial",
+            "2026-10-13",
+            97,
+            88,
+            9,
+            [
+              [
+                85,
+                59
+              ],
+              [
+                155,
+                29
+              ]
+            ]
+          ],
+          [
+            250,
+            "48124",
+            "1",
+            "MRO-137",
+            "6002 bearing",
+            "Cascade Controls",
+            "2026-10-20",
+            62,
+            0,
+            62,
+            []
+          ],
+          [
+            251,
+            "48124",
+            "2",
+            "MRO-138",
+            "24V relay",
+            "Ridgeway Fasteners",
+            "2026-10-21",
+            70,
+            0,
+            70,
+            []
+          ],
+          [
+            266,
+            "48132",
+            "1",
+            "MRO-117",
+            "M8 flange bolt",
+            "Ridgeway Fasteners",
+            "2026-10-12",
+            53,
+            50,
+            3,
+            [
+              [
+                17,
+                50
+              ]
+            ]
+          ],
+          [
+            321,
+            "48159",
+            "2",
+            "MRO-136",
+            "EPDM seal kit",
+            "Alder Industrial",
+            "2026-10-19",
+            26,
+            15,
+            11,
+            [
+              [
+                54,
+                5
+              ],
+              [
+                107,
+                10
+              ]
+            ]
+          ]
+        ]
+      }
+    }
+  }
+}
