@@ -86,7 +86,7 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
                         prior_artifacts=run["prior_artifacts"],
                         read_prior_artifact=lambda reference_id: store.read_prior_artifact(task_id, reference_id),
-                        search_saved_work=lambda query: store.search_saved_work(task_id, query),
+                        search_saved_work=lambda query, kind="any": store.search_saved_work(task_id, query, kind),
                         pin_saved_work=lambda source_task_id, name, revision: store.pin_saved_work(
                             task_id, source_task_id, name, revision
                         ),
@@ -341,6 +341,18 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     async def submit_from_revision(request: Request, task_id: str, name: str,
                                    revision: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
         return await submit_assignment(request, (task_id, name, revision))
+
+    reuse_upload_path = "/tasks/{task_id}/uploads/{name}/new-assignment"
+
+    @app.get(reuse_upload_path)
+    def new_from_upload(request: Request, task_id: str, name: str):
+        if store.read_upload(task_id, name) is None:
+            raise HTTPException(404, "Uploaded file not found.")
+        return render_index(request, prior_revision=(task_id, name, None))
+
+    @app.post(reuse_upload_path)
+    async def submit_from_upload(request: Request, task_id: str, name: str):
+        return await submit_assignment(request, (task_id, name, None))
 
     def render_assignment(
         request, task_id, *, draft="", error=None, reply_to=None, correction_draft="", control_error=None, status_code=200,
@@ -605,7 +617,10 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     def prior_artifact(request: Request, task_id: str, reference_id: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
         prior = store.prior_artifact(task_id, reference_id)
         if prior is None:
-            raise HTTPException(404, "Prior revision not found.")
+            raise HTTPException(404, "Earlier file not found.")
+        if prior.get("kind") == "upload":
+            url = request.url_for("uploaded_source", task_id=prior["source_task_id"], name=quote(prior["name"], safe=""))
+            return RedirectResponse(url, status_code=303)
         url = request.url_for("artifact", task_id=prior["source_task_id"], name=prior["name"])
         # Relative citations in the earlier report resolve within its original assignment.
         return RedirectResponse(url.include_query_params(revision=prior["revision"]), status_code=303)

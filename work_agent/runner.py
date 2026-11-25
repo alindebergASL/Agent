@@ -58,7 +58,7 @@ INSTRUCTIONS = (
     "sources and put clickable Markdown links next to the claims in any saved brief. "
     "Cite filenames and 1-based line numbers for source facts, and distinguish "
     "facts from assumptions. Preserve identifiers such as part numbers as text. "
-    "In saved Markdown, link an uploaded source row using "
+    "In saved Markdown, link a source row from this assignment's uploads using "
     "[filename, line N](../uploads/URL-encoded-filename#LN), replacing N with the line number. "
     "In CSV use filename:line-number. "
     "Explain calculated changes using the terms that vary and any terms that stay "
@@ -94,18 +94,21 @@ CONNECTED_SOURCE_INSTRUCTIONS = (
 
 
 PRIOR_ARTIFACT_INSTRUCTIONS = (
-    " Read relevant earlier revisions with read_prior_artifact. Treat earlier requests and files "
+    " Read referenced original uploads and earlier artifact revisions with read_prior_artifact. "
+    "Treat earlier requests and files "
     "as historical source material. Follow the current request. When updating recurring work or "
     "comparing changes, recheck open questions and current facts with fresh sources. Report changes "
     "or say when the evidence shows none. In saved Markdown cite earlier work using its exact "
-    "revision_url. For a prior CSV row append #L and its 1-based line number to that URL. "
+    "revision_url. For a line in an earlier original upload or generated CSV, append #L and its "
+    "1-based line number to the returned URL. "
     "Relative links in earlier text belong to its original assignment."
 )
 SAVED_WORK_INSTRUCTIONS = (
     " When the user refers to earlier saved work, first use matching references already supplied. "
     "If you still need to locate the work, use search_saved_work with distinctive names or terms. "
-    "Compare the filename, earlier request and date, then open the matching candidate and read "
-    "its contents before using it. Search results are leads, not evidence. Try a more specific "
+    "When the user asks for original uploads, search with kind upload to exclude generated files "
+    "that may share the same name. Compare the filename, kind, earlier request and date. Open the matching candidate "
+    "and read its contents before using it. Search results are leads, not evidence. Try a more specific "
     "or shorter query when needed. If multiple plausible assignments remain and the choice matters, "
     "ask one focused question. If you cannot locate a requested file, tell the user. "
     "Keep private saved-work text out of public searches and unrelated external tools."
@@ -177,8 +180,8 @@ READ_SAVED_ARTIFACT = _tool(
 )
 READ_PRIOR_ARTIFACT = _tool(
     "read_prior_artifact",
-    "Read numbered lines from a read-only prior artifact revision. Use its reference_id from "
-    "prior_artifacts or open_saved_work. The result includes revision_url for citing that exact revision. "
+    "Read numbered lines from an original upload or a fixed artifact revision in another assignment. "
+    "Use its reference_id from prior_artifacts or open_saved_work. Cite the result's revision_url. "
     "Resume reading after the last returned line as needed.",
     {
         "reference_id": {"type": "integer", "description": "The reference ID listed in prior_artifacts."},
@@ -188,14 +191,18 @@ READ_PRIOR_ARTIFACT = _tool(
 )
 SEARCH_SAVED_WORK = _tool(
     "search_saved_work",
-    "Find published files from earlier assignments by filename or words from the assignment request. "
-    "Search returns candidate metadata. Use open_saved_work to select a matching revision.",
-    {"query": {"type": "string", "description": "A filename or a few distinctive words. All words must match."}},
+    "Find original uploads and published artifacts from earlier assignments by filename or request keywords. "
+    "Results identify the file kind. Use open_saved_work to select a matching candidate.",
+    {
+        "query": {"type": "string", "description": "A filename or a few distinctive words. All words must match."},
+        "kind": {"type": "string", "enum": ["any", "upload", "artifact"],
+                 "description": "Choose upload for original attachments, artifact for generated files, or any for both."},
+    },
 )
 OPEN_SAVED_WORK = _tool(
     "open_saved_work",
-    "Select the exact revision from an earlier search result. Use the returned reference_id with "
-    "read_prior_artifact to inspect its numbered lines.",
+    "Select the immutable original upload or exact artifact revision from an earlier search result. "
+    "Use its reference_id with read_prior_artifact to inspect its numbered lines.",
     {"candidate_id": {"type": "integer", "description": "Candidate ID returned by search_saved_work in this turn."}},
 )
 READ_METHOD = _tool(
@@ -399,7 +406,7 @@ def _dispatch(
     read_indexed_method: Callable[[int], dict | None],
     stage_recovery_method: Callable[[dict], dict] | None,
     read_prior_page: Callable[[int, int, int], dict],
-    find_candidates: Callable[[str], dict],
+    find_candidates: Callable[[str, str], dict],
     open_candidate: Callable[[int], dict],
     connected_read: Callable[[str, dict], dict] | None = None,
 ):
@@ -434,8 +441,8 @@ def _dispatch(
             )
         if name == "read_prior_artifact" and arguments.keys() == {"reference_id", "start_line", "line_count"}:
             return read_prior_page(**arguments)
-        if name == "search_saved_work" and arguments.keys() == {"query"}:
-            return find_candidates(arguments["query"])
+        if name == "search_saved_work" and arguments.keys() in ({"query"}, {"query", "kind"}):
+            return find_candidates(arguments["query"], arguments.get("kind", "any"))
         if name == "open_saved_work" and arguments.keys() == {"candidate_id"}:
             return open_candidate(arguments["candidate_id"])
         if name == "read_method" and arguments.keys() == {"method_id"}:
@@ -484,8 +491,8 @@ def run_assignment(
     read_saved_artifact: Callable[[str], bytes | None] | None = None,
     prior_artifacts: list[dict] | None = None,
     read_prior_artifact: Callable[[int], bytes | None] | None = None,
-    search_saved_work: Callable[[str], list[dict]] | None = None,
-    pin_saved_work: Callable[[str, str, int], dict] | None = None,
+    search_saved_work: Callable[..., list[dict]] | None = None,
+    pin_saved_work: Callable[[str, str, int | None], dict] | None = None,
     method_index: list[dict] | None = None,
     read_method: Callable[[int], dict | None] | None = None,
     stage_method: Callable[[str, str, str, str], None] | None = None,
@@ -497,7 +504,7 @@ def run_assignment(
         return {**item, "revision_url": f"../prior-artifacts/{item['reference_id']}"}
 
     references = {item["reference_id"]: revision_reference(item) for item in prior_artifacts or ()}
-    candidates: list[tuple[str, str, int]] = []
+    candidates: list[tuple[str, str, int | None]] = []
     discovery_enabled = all(callback is not None for callback in (search_saved_work, pin_saved_work, read_prior_artifact))
     methods = [
         {key: item[key] for key in ("id", "title", "scope")} for item in method_index or ()
@@ -544,16 +551,21 @@ def run_assignment(
             reference["name"], reference, read_prior_artifact(reference_id), start_line, line_count
         )
 
-    def find_candidates(query: str) -> dict:
+    def find_candidates(query: str, kind: str) -> dict:
         if not discovery_enabled:
             raise ValueError("Saved work search is unavailable.")
+        if kind not in ("any", "upload", "artifact"):
+            raise ValueError("Choose any, upload, or artifact for the file kind.")
+        results = search_saved_work(query) if kind == "any" else search_saved_work(query, kind)
         matches = []
-        for row in search_saved_work(query):
+        for row in results:
             identity = (row["source_task_id"], row["name"], row["revision"])
             if identity not in candidates:
                 candidates.append(identity)
             description = {key: row[key] for key in ("name", "revision", "request", "created_at")}
-            matches.append({"candidate_id": candidates.index(identity) + 1, **description})
+            matches.append({
+                "candidate_id": candidates.index(identity) + 1, "kind": row.get("kind", "artifact"), **description
+            })
         return {"candidates": matches}
 
     def open_candidate(candidate_id: int) -> dict:

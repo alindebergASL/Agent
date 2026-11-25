@@ -12,8 +12,13 @@
   {% if not enabled %}<p class="notice">Set <code>OPENAI_API_KEY</code> and restart the app to submit assignments.</p>{% endif %}
   {% if prior_revision %}
     {% set source_task, source_name, revision = prior_revision %}
-    {% set submit_url = url_for('submit_from_revision', task_id=source_task, name=source_name, revision=revision) %}
-    <p>Using <a href="{{ url_for('artifact', task_id=source_task, name=source_name) }}?revision={{ revision }}">{{ source_name }} · Revision {{ revision }}</a></p>
+    {% if revision is none %}
+      {% set submit_url = url_for('submit_from_upload', task_id=source_task, name=source_name|urlencode) %}
+      <p>Using <a href="{{ url_for('uploaded_source', task_id=source_task, name=source_name|urlencode) }}">{{ source_name }} · Original upload</a></p>
+    {% else %}
+      {% set submit_url = url_for('submit_from_revision', task_id=source_task, name=source_name, revision=revision) %}
+      <p>Using <a href="{{ url_for('artifact', task_id=source_task, name=source_name) }}?revision={{ revision }}">{{ source_name }} · Revision {{ revision }}</a></p>
+    {% endif %}
   {% else %}
     {% set submit_url = url_for('submit') %}
   {% endif %}

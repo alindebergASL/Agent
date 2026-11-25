@@ -69,7 +69,7 @@ Each new occurrence can read the revision of the previous brief that was current
 
 ## Find a file from earlier work
 
-To reuse earlier work, start a new assignment and refer to a saved file by name or by words from its original request. You can also open a saved file and select **Start an assignment with this revision**. The new assignment can cite the exact revision it used. [Try the meeting-brief and CSV examples](docs/find-saved-work.md).
+To reuse earlier work, start a new assignment and refer to an original upload or generated file by name or by words from its assignment. For example, ask for the supplier quotes you uploaded last week. The agent can open the original sources, cite their rows, and save a new comparison. You can also start a new assignment directly from an open upload or saved revision. [Try the meeting-brief, CSV, and original-quote examples](docs/find-saved-work.md).
 
 ## Run the quote demonstration
 
@@ -79,7 +79,22 @@ Upload both CSVs from [examples/quotes](examples/quotes) and submit the request 
 docker compose up -d --force-recreate app
 ```
 
-Compose mounts the `agent-data` volume at `/data` for the assignment database, inputs, and outputs. Keep the volume when recreating the container or updating the app.
+### Where the app stores files
+
+Compose mounts the named volume `agent-data` at `/data`. Each Compose project normally gets its own volume. Recreating the app container with the same volume preserves assignments and files.
+
+| Data | Location and identity |
+| --- | --- |
+| Original uploads | SQLite database `/data/agent.sqlite3`, table `uploads`. Each record contains the original bytes, filename, upload position, and links to the assignment and turn. Within an assignment each filename is unique. |
+| Generated files | The same database, table `artifact_revisions`. Each published version has an assignment, filename, revision number, author, and content. A user edit creates another revision. |
+| Reused files | The consuming assignment holds a reference back to the original upload or a specific generated revision. The same filename can exist in several assignments. |
+| Early installations | An upload from the first storage format may still have its bytes at `/data/runs/<assignment-id>/inputs/<position>`. The database records the position and the reader supports both formats. |
+
+On the production EC2 deployment, this command prints the host directory for its named volume. For an isolated test project, substitute its actual volume name.
+
+```bash
+docker volume inspect --format '{{ .Mountpoint }}' agent_agent-data
+```
 
 Open **Run history (JSON)** from a task's Activity section to inspect its saved Responses items and tool receipts. Hosted calls share a program ID, and Activity shows the file and line range each program read. The history can include uploaded text and records from connected systems, so review it before sharing.
 
