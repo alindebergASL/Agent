@@ -1,0 +1,232 @@
+{
+  "assignment_id": "2bbae249f5d340edafe423d951c21adb",
+  "status": "completed",
+  "model": "gpt-6.2-sol",
+  "programs": {
+    "call_armdF5faEozVcjOvyTHqPReg": {
+      "code": "const p=\"purchase-orders.csv\",r=\"receipts.csv\"; const files=await Promise.all([[p,321],[r,386]].map(async ([file_id,total])=>{let lines=[];for(let start_line=1;start_line<=total;){let a=await tools.read_file({file_id,start_line,line_count:100});if(!a.lines?.length||a.lines[0].number!==start_line)throw Error(JSON.stringify(a));lines.push(...a.lines);start_line=a.lines.at(-1).number+1;}return {file_id,lines};}));\nconst rows=files.map(f=>f.lines.slice(1).map(l=>({n:l.number,v:l.text.split(\",\")})));\nconst key=(a,b)=>JSON.stringify([a,b]);const map=new Map();const anomalies=[];const receiptIDs=new Set(); for(const {n,v} of rows[0]){let [po,line,sku,item,supplier,due,qty]=v;let k=key(po,line);if(map.has(k)||v.length!==7||!/^\\d+$/.test(qty))throw Error(JSON.stringify({n,v}));map.set(k,{po,line,sku,item,supplier,due,o:+qty,p:n,rc:[]});}\nfor(const {n,v} of rows[1]){let [id,po,line,sku,date,qty]=v;let a=map.get(key(po,line));if(receiptIDs.has(id))anomalies.push({type:\"duplicate receipt ID\",n,v});receiptIDs.add(id);if(!a||a.sku!==sku||v.length!==6||!(/^-?\\d+$/.test(qty))){anomalies.push({type:\"unmatched or invalid\",n,v,expected:a?.sku});continue;}a.rc.push([n,+qty]);}\nlet all=[...map.values()];for(let a of all){a.r=a.rc.reduce((t,rr)=>t+rr[1],0);a.s=a.o-a.r;}const out=all.filter(a=>a.s>0).sort((a,b)=>b.s-a.s||a.p-b.p);text({files:files.map(f=>[f.file_id,f.lines[0].number,f.lines.at(-1).number,f.lines.length]),anomalies,over:all.filter(a=>a.s<0),idCases:all.filter(a=>[\"000731\",\"731\"].includes(a.po)),count:out.length,none:out.filter(a=>!a.rc.length).length,maxReceiptDate:rows[1].map(x=>x.v[4]).sort().at(-1),totalCols:[\"o\",\"r\",\"s\"].map(c=>[out.map(a=>a[c]).join(\"+\"),out.reduce((s,a)=>s+a[c],0)]),out});\n",
+      "status": "completed",
+      "result": {
+        "files": [
+          [
+            "purchase-orders.csv",
+            1,
+            321,
+            321
+          ],
+          [
+            "receipts.csv",
+            1,
+            386,
+            386
+          ]
+        ],
+        "anomalies": [],
+        "over": [],
+        "idCases": [
+          {
+            "po": "000731",
+            "line": "1",
+            "sku": "MRO-113",
+            "item": "6002 bearing",
+            "supplier": "Cascade Controls",
+            "due": "2026-10-20",
+            "o": 47,
+            "p": 10,
+            "rc": [
+              [
+                28,
+                14
+              ],
+              [
+                188,
+                29
+              ]
+            ],
+            "r": 43,
+            "s": 4
+          },
+          {
+            "po": "000731",
+            "line": "2",
+            "sku": "MRO-114",
+            "item": "24V relay",
+            "supplier": "Ridgeway Fasteners",
+            "due": "2026-10-21",
+            "o": 57,
+            "p": 11,
+            "rc": [
+              [
+                81,
+                57
+              ]
+            ],
+            "r": 57,
+            "s": 0
+          },
+          {
+            "po": "731",
+            "line": "1",
+            "sku": "MRO-129",
+            "item": "M8 flange bolt",
+            "supplier": "Ridgeway Fasteners",
+            "due": "2026-10-12",
+            "o": 35,
+            "p": 98,
+            "rc": [
+              [
+                262,
+                35
+              ]
+            ],
+            "r": 35,
+            "s": 0
+          },
+          {
+            "po": "731",
+            "line": "2",
+            "sku": "MRO-130",
+            "item": "EPDM seal kit",
+            "supplier": "Alder Industrial",
+            "due": "2026-10-13",
+            "o": 58,
+            "p": 99,
+            "rc": [
+              [
+                32,
+                58
+              ]
+            ],
+            "r": 58,
+            "s": 0
+          }
+        ],
+        "count": 6,
+        "none": 2,
+        "maxReceiptDate": "2026-11-03",
+        "totalCols": [
+          [
+            "70+62+26+38+47+53",
+            296
+          ],
+          [
+            "0+0+15+31+43+50",
+            139
+          ],
+          [
+            "70+62+11+7+4+3",
+            157
+          ]
+        ],
+        "out": [
+          {
+            "po": "48124",
+            "line": "2",
+            "sku": "MRO-138",
+            "item": "24V relay",
+            "supplier": "Ridgeway Fasteners",
+            "due": "2026-10-21",
+            "o": 70,
+            "p": 251,
+            "rc": [],
+            "r": 0,
+            "s": 70
+          },
+          {
+            "po": "48124",
+            "line": "1",
+            "sku": "MRO-137",
+            "item": "6002 bearing",
+            "supplier": "Cascade Controls",
+            "due": "2026-10-20",
+            "o": 62,
+            "p": 250,
+            "rc": [],
+            "r": 0,
+            "s": 62
+          },
+          {
+            "po": "48159",
+            "line": "2",
+            "sku": "MRO-136",
+            "item": "EPDM seal kit",
+            "supplier": "Alder Industrial",
+            "due": "2026-10-19",
+            "o": 26,
+            "p": 321,
+            "rc": [
+              [
+                54,
+                5
+              ],
+              [
+                107,
+                10
+              ]
+            ],
+            "r": 15,
+            "s": 11
+          },
+          {
+            "po": "48074",
+            "line": "2",
+            "sku": "MRO-110",
+            "item": "DIN terminal",
+            "supplier": "Cascade Controls",
+            "due": "2026-10-17",
+            "o": 38,
+            "p": 151,
+            "rc": [
+              [
+                152,
+                31
+              ]
+            ],
+            "r": 31,
+            "s": 7
+          },
+          {
+            "po": "000731",
+            "line": "1",
+            "sku": "MRO-113",
+            "item": "6002 bearing",
+            "supplier": "Cascade Controls",
+            "due": "2026-10-20",
+            "o": 47,
+            "p": 10,
+            "rc": [
+              [
+                28,
+                14
+              ],
+              [
+                188,
+                29
+              ]
+            ],
+            "r": 43,
+            "s": 4
+          },
+          {
+            "po": "48132",
+            "line": "1",
+            "sku": "MRO-117",
+            "item": "M8 flange bolt",
+            "supplier": "Ridgeway Fasteners",
+            "due": "2026-10-12",
+            "o": 53,
+            "p": 266,
+            "rc": [
+              [
+                17,
+                50
+              ]
+            ],
+            "r": 50,
+            "s": 3
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+po_number,po_line,sku,item_description,supplier,due_date,ordered_qty,received_qty,short_qty,po_source_row,receipt_source_rows
+"48124",2,MRO-138,24V relay,Ridgeway Fasteners,2026-10-21,70,0,70,purchase-orders.csv:251,
+"48124",1,MRO-137,6002 bearing,Cascade Controls,2026-10-20,62,0,62,purchase-orders.csv:250,
+"48159",2,MRO-136,EPDM seal kit,Alder Industrial,2026-10-19,26,15,11,purchase-orders.csv:321,receipts.csv:54; receipts.csv:107
+"48074",2,MRO-110,DIN terminal,Cascade Controls,2026-10-17,38,31,7,purchase-orders.csv:151,receipts.csv:152
+"000731",1,MRO-113,6002 bearing,Cascade Controls,2026-10-20,47,43,4,purchase-orders.csv:10,receipts.csv:28; receipts.csv:188
+"48132",1,MRO-117,M8 flange bolt,Ridgeway Fasteners,2026-10-12,53,50,3,purchase-orders.csv:266,receipts.csv:17
