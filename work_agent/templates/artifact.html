@@ -8,9 +8,12 @@
     <a class="download" href="?{% if historical %}revision={{ saved.revision }}&amp;{% endif %}download=1">Download</a>
   </div>
   <p class="help">Revision {{ saved.revision }} · {% if saved.author == "user" %}User edit{% else %}Agent{% endif %}</p>
+  <p><a href="{{ url_for('new_from_revision', task_id=task_id, name=name, revision=saved.revision) }}">Start an assignment with this revision</a></p>
   {% if historical %}<p><a href="{{ url_for('artifact', task_id=task_id, name=name) }}">Current revision</a></p>{% endif %}
   {% if markdown_html is not none %}
   <div class="artifact-markdown">{{ markdown_html | safe }}</div>
+  {% elif historical and name.endswith(".csv") %}
+  {% with lines = content.splitlines() %}{% include "source_lines.html" %}{% endwith %}
   {% else %}
   <pre>{{ content }}</pre>
   {% endif %}

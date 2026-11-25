@@ -10,7 +10,14 @@
   </div>
   {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
   {% if not enabled %}<p class="notice">Set <code>OPENAI_API_KEY</code> and restart the app to submit assignments.</p>{% endif %}
-  <form action="{{ url_for('submit') }}" method="post" enctype="multipart/form-data">
+  {% if prior_revision %}
+    {% set source_task, source_name, revision = prior_revision %}
+    {% set submit_url = url_for('submit_from_revision', task_id=source_task, name=source_name, revision=revision) %}
+    <p>Using <a href="{{ url_for('artifact', task_id=source_task, name=source_name) }}?revision={{ revision }}">{{ source_name }} · Revision {{ revision }}</a></p>
+  {% else %}
+    {% set submit_url = url_for('submit') %}
+  {% endif %}
+  <form action="{{ submit_url }}" method="post" enctype="multipart/form-data">
     <label for="request">What would you like done?</label>
     <textarea id="request" name="request" rows="6" maxlength="8000" required>{{ draft }}</textarea>
     <label for="files">Supporting files</label>
