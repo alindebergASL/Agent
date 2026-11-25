@@ -54,11 +54,15 @@ def format_pacific(epoch: int) -> str:
     return f"{local:%A, %B} {local.day}, {local.year} at {hour}:{local:%M %p %Z}"
 
 
-def scheduled_request(request: str, due_at: int, now: datetime) -> str:
+def scheduled_request(request: str, due_at: int, now: datetime, *, manual: bool = False) -> str:
     run_date = now.astimezone(PACIFIC).date().isoformat()
+    occurrence = (
+        "This weekly responsibility was run on demand."
+        if manual else f"This is the occurrence scheduled for {format_pacific(due_at)}."
+    )
     return (
         f"{request}\n\n"
-        f"This is the occurrence scheduled for {format_pacific(due_at)}. "
+        f"{occurrence} "
         f"Use {run_date} Pacific as the run date for relative dates such as the past week. "
         "Include that date in any saved brief."
     )

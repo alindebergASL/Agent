@@ -253,6 +253,21 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         wake.set()
         return RedirectResponse(request.url_for("responsibility"), status_code=303)
 
+    @app.post("/responsibility/{schedule_id}/run-now")
+    async def run_responsibility_now(request: Request, schedule_id: ScheduleId):
+        check_form_origin(request)
+        check_form_size(request, 1024)
+        if model is None:
+            return render_responsibility(request, error="Configure a model before running the responsibility.", status_code=503)
+        try:
+            task_id = await asyncio.to_thread(store.enqueue_schedule_now, schedule_id, now=clock())
+        except KeyError:
+            raise HTTPException(404, "Weekly responsibility not found.") from None
+        except ValueError as exc:
+            return render_responsibility(request, error=str(exc), status_code=409)
+        wake.set()
+        return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
+
     @app.post("/responsibility/{schedule_id}/stop")
     async def stop_responsibility(request: Request, schedule_id: ScheduleId):
         check_form_origin(request)

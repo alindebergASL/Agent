@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS {{table}} (
 );
 """
 
+SCHEDULE_OCCURRENCES_TABLE = """
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+    schedule_id INTEGER NOT NULL REFERENCES weekly_schedules(id),
+    due_at INTEGER NOT NULL,
+    task_id TEXT NOT NULL PRIMARY KEY REFERENCES tasks(id),
+    manual INTEGER NOT NULL DEFAULT 0 CHECK (manual IN (0, 1))
+)
+"""
+
 SCHEMA = TASKS_TABLE.format(table="tasks") + TURNS_TABLE.format(table="turns") + """
 CREATE TABLE IF NOT EXISTS uploads (
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -114,13 +123,7 @@ CREATE TABLE IF NOT EXISTS weekly_schedules (
     stopped_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_schedule ON weekly_schedules(1) WHERE stopped_at IS NULL;
-CREATE TABLE IF NOT EXISTS schedule_occurrences (
-    schedule_id INTEGER NOT NULL REFERENCES weekly_schedules(id),
-    due_at INTEGER NOT NULL,
-    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
-    PRIMARY KEY (schedule_id, due_at)
-);
-"""
+""" + SCHEDULE_OCCURRENCES_TABLE + ";"
 
 
 class RevisionConflict(RuntimeError):
@@ -172,6 +175,19 @@ class Store:
                 if "turn_id" not in {column["name"] for column in columns}:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN turn_id INTEGER REFERENCES turns(id)")
             connection.execute("CREATE INDEX IF NOT EXISTS events_turn ON events(turn_id, id)")
+            columns = connection.execute("PRAGMA table_info(schedule_occurrences)")
+            if "manual" not in {column["name"] for column in columns}:
+                connection.execute("ALTER TABLE schedule_occurrences RENAME TO schedule_occurrences_legacy")
+                connection.execute(SCHEDULE_OCCURRENCES_TABLE)
+                connection.execute(
+                    """INSERT INTO schedule_occurrences (schedule_id, due_at, task_id)
+                    SELECT schedule_id, due_at, task_id FROM schedule_occurrences_legacy"""
+                )
+                connection.execute("DROP TABLE schedule_occurrences_legacy")
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS one_scheduled_occurrence
+                ON schedule_occurrences (schedule_id, due_at) WHERE manual = 0"""
+            )
             self._migrate_tasks(connection)
             connection.execute(
                 "UPDATE turns SET status = 'interrupted', error = ? WHERE status = 'running'",
@@ -302,25 +318,26 @@ class Store:
                 return None
             latest_run = connection.execute(
                 """
-                SELECT occurrence.task_id, occurrence.due_at, task.status
+                SELECT occurrence.task_id, occurrence.due_at, occurrence.manual, task.status
                 FROM schedule_occurrences AS occurrence
                 JOIN tasks AS task ON task.id = occurrence.task_id
                 WHERE occurrence.schedule_id = ?
-                ORDER BY occurrence.due_at DESC LIMIT 1
+                ORDER BY occurrence.due_at DESC, task.rowid DESC LIMIT 1
                 """,
                 (schedule["id"],),
             ).fetchone()
             brief_files = connection.execute(
                 """
                 WITH brief_turn AS (
-                    SELECT occurrence.task_id, occurrence.due_at, turn.id AS turn_id
+                    SELECT occurrence.task_id, occurrence.due_at, occurrence.manual, turn.id AS turn_id
                     FROM schedule_occurrences AS occurrence
+                    JOIN tasks AS task ON task.id = occurrence.task_id
                     JOIN turns AS turn ON turn.task_id = occurrence.task_id AND turn.status = 'completed'
                     JOIN artifact_revisions AS artifact ON artifact.turn_id = turn.id
                     WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
-                    ORDER BY occurrence.due_at DESC, turn.id ASC LIMIT 1
+                    ORDER BY occurrence.due_at DESC, task.rowid DESC, turn.id ASC LIMIT 1
                 )
-                SELECT brief_turn.task_id, brief_turn.due_at, artifact.name
+                SELECT brief_turn.task_id, brief_turn.due_at, brief_turn.manual, artifact.name
                 FROM brief_turn JOIN artifact_revisions AS artifact USING (task_id, turn_id)
                 WHERE artifact.name LIKE '%.md' ORDER BY artifact.name
                 """,
@@ -331,6 +348,7 @@ class Store:
                 latest_brief = {
                     "task_id": brief_files[0]["task_id"],
                     "due_at": brief_files[0]["due_at"],
+                    "manual": brief_files[0]["manual"],
                     "names": [row["name"] for row in brief_files],
                 }
             return {
@@ -363,17 +381,45 @@ class Store:
             at = parse_schedule_time(schedule["local_time"])
             due_at = latest_occurrence(schedule["weekday"], at, now)
             next_run_at = next_occurrence(schedule["weekday"], at, now)
-            task_id = uuid.uuid4().hex
-            self._insert_task(connection, task_id, scheduled_request(schedule["request"], due_at, now))
-            connection.execute(
-                "INSERT INTO schedule_occurrences (schedule_id, due_at, task_id) VALUES (?, ?, ?)",
-                (schedule["id"], due_at, task_id),
-            )
+            task_id = self._enqueue_occurrence(connection, schedule, due_at, now, manual=False)
             connection.execute(
                 "UPDATE weekly_schedules SET next_run_at = ? WHERE id = ?",
                 (next_run_at, schedule["id"]),
             )
             return task_id
+
+    def enqueue_schedule_now(self, schedule_id: int, *, now: datetime) -> str:
+        due_at = self._schedule_epoch(now)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            schedule = connection.execute("SELECT * FROM weekly_schedules WHERE id = ?", (schedule_id,)).fetchone()
+            if schedule is None:
+                raise KeyError(schedule_id)
+            if schedule["stopped_at"] is not None:
+                raise ValueError("This weekly responsibility was already stopped.")
+            active = connection.execute(
+                """
+                SELECT task.id FROM schedule_occurrences AS occurrence
+                JOIN tasks AS task ON task.id = occurrence.task_id
+                WHERE occurrence.schedule_id = ? AND occurrence.manual = 1
+                    AND task.status IN ('queued', 'running', 'waiting')
+                ORDER BY task.rowid DESC LIMIT 1
+                """,
+                (schedule_id,),
+            ).fetchone()
+            if active is not None:
+                return active["id"]
+            return self._enqueue_occurrence(connection, schedule, due_at, now, manual=True)
+
+    def _enqueue_occurrence(self, connection, schedule, due_at: int, now: datetime, *, manual: bool) -> str:
+        task_id = uuid.uuid4().hex
+        self._insert_task(connection, task_id, scheduled_request(schedule["request"], due_at, now, manual=manual))
+        connection.execute(
+            """INSERT INTO schedule_occurrences (schedule_id, due_at, task_id, manual)
+            VALUES (?, ?, ?, ?)""",
+            (schedule["id"], due_at, task_id, manual),
+        )
+        return task_id
 
     def _schedule_epoch(self, now: datetime) -> int:
         if now.utcoffset() is None:
