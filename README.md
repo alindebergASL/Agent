@@ -21,7 +21,10 @@ Open `http://127.0.0.1:8000`. The app uses `gpt-6.2-sol` by default. To use Terr
 
 Work Agent can discover selected read tools from HTTP MCP servers and call them directly or from OpenAI-hosted JavaScript. A program can combine those records with uploaded files and saved revisions in the same assignment. Each successful connected read records the returned data on the assignment. A citation in a saved Markdown report can reopen that snapshot after the upstream data changes.
 
-For a runnable example, connect two local sources and ask which purchase orders are short. The example includes the Compose configuration, source setup, and independent verification steps. [Purchasing and warehouse example](examples/connected-sources/README.md)
+Two examples run through the normal assignment page:
+
+- Ask which purchase orders are short across purchasing and warehouse. Correct one upstream receipt and verify both reports. [Purchasing and warehouse example](examples/connected-sources/README.md)
+- Ask “How are we doing, and what’s next?” about a public GitHub repository. Save a status brief, then use the same assignment to ask what changed. The source reads pull requests, comments and reviews without a GitHub token. [GitHub status brief](examples/github-status/README.md)
 
 To connect your own system, mount a JSON file read-only into the app container and set `WORK_AGENT_MCP_CONFIG` to its container path. List the exact tool names the program may call. Each tool must advertise `readOnlyHint: true` and omit or disable `destructiveHint`. Use a credential with read access to the intended data. Supply its value to the app through the environment variable named by `token_env`. Bearer authentication requires HTTPS.
 

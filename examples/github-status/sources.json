@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "name": "github",
+      "url": "http://github:8000/mcp",
+      "tools": ["list_pull_requests", "get_pull_request", "list_pull_request_notes"]
+    }
+  ]
+}
