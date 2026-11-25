@@ -1,8 +1,12 @@
 # Find a file from earlier work
 
-Start a fresh assignment with a request such as “Find my last University of Iowa meeting brief and check what has changed.” Work Agent searches the filenames of original uploads and generated files, the original assignment request, and the request that attached or first produced each file. Results identify the file type, filename, request excerpt, and date. Generated files also have a revision. A match on text that appears only inside a document requires another clue such as the filename. Search covers the app's single-user workspace.
+Start a fresh assignment with a request such as “Find my last University of Iowa meeting brief and check what has changed.” Work Agent searches the full text of original uploads and the latest published revision of each generated file in its single-user workspace. A filename, a phrase from the assignment, an identifier, or a phrase from the middle of a document can locate a file.
 
-The agent can narrow its search, ask which assignment you meant, or open a result and read numbered lines. Opening a result pins the revision that appeared in the search. You can also choose **Start an assignment with this revision** from a current or historical file. Follow the new report's citation back to the saved revision. Citations to CSV lines can take you directly to the cited row.
+A matching passage includes its physical source lines and an excerpt. CSV records retain their column headings and quoted multiline ranges. Markdown passages retain their section headings. The agent opens a candidate and reads the numbered original lines before citing it.
+
+The SQLite index combines exact filename and keyword matches with contextual similarity. For example, two documents that use *shipping* and *freight* can match when both terms occur alongside similar language. The model may also supply up to three paraphrases in one search. An exact identifier such as `000731` is searchable with its leading zeros. Indexing and ranking run locally on the app's data volume. Selected passages are returned to the assignment's model. Existing volumes are indexed at startup, and a new publication or edit is indexed for the next search.
+
+The agent can narrow a search or ask which assignment you meant. Opening a result pins the revision that appeared in the search. You can also choose **Start an assignment with this revision** from a current or historical file. Follow the new report's citation back to the saved revision. Citations to CSV lines can take you directly to the cited row.
 
 ## Try it on an isolated EC2 deployment
 
@@ -34,3 +38,11 @@ For two shipments, expect Supplier A at $2,060 and Supplier B at $2,080. For one
 ## Design references
 
 SQLite FTS5 provides keyword search and weighted BM25 ranking inside the application's existing database. An exact filename ranks first. The model gets short descriptions to distinguish candidates, then reads the selected file on demand. This keeps the source revision available for verification and lets us evaluate actual choices on similar filenames. [SQLite FTS5](https://www.sqlite.org/fts5.html#the_bm25_function) · [Anthropic on tool results and evaluation](https://www.anthropic.com/research/writing-tools-for-agents) · [Anthropic on on-demand retrieval](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+
+## Follow a citation back to the decision
+
+Open an original upload or a saved revision and choose **Where this original was used** or **Where this revision was used**. Each citing report link opens the published revision that actually links to the source. The ledger also shows the cited rows, claims in project notes, scoped source changes, and assignments that selected or read the file. A successful nonempty tool read is recorded separately from a pinned file and from a citation. A filename or a Markdown link inside a code sample does not establish a relationship.
+
+An indirect review candidate follows two explicit citations. For example, a rollout decision cites revision 1 of a checklist, and that checklist cites a row of an approval policy. Review the checklist and decision to determine whether a changed policy affects the outcome. A decision citing revision 2 of the checklist appears on the policy ledger only if that revision also links to the policy. The links preserve historical revisions, and tracing leaves the decision unchanged.
+
+The agent can use `find_evidence_uses` with a listed original upload, an exact saved revision in the current assignment, or a previously selected file’s reference ID. It can open either report in a returned path and continue tracing from that revision. Results are paged. Inspect the revision and the cited evidence before changing a conclusion.

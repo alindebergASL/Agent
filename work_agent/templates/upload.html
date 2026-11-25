@@ -8,6 +8,7 @@
     <a class="download" href="?download=1">Download original</a>
   </div>
   <p><a href="{{ url_for('new_from_upload', task_id=task_id, name=name|urlencode) }}">Start an assignment with this original</a></p>
+  <p><a href="{{ url_for('evidence_uses', task_id=task_id, kind='upload', name=name|urlencode) }}">Where this original was used</a></p>
   {% include "source_lines.html" %}
 </section>
 {% endblock %}

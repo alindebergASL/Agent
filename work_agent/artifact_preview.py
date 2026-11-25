@@ -8,7 +8,29 @@ from markdown_it import MarkdownIt
 from markdown_it.renderer import RendererHTML
 
 
-UPLOAD_CITATION = re.compile(r"\.\./uploads/((?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)#L[1-9][0-9]{0,5}")
+FILE_CITATION = re.compile(
+    r"(?:\.\.|/tasks/(?P<task>[a-f0-9]{32}))/(?P<kind>uploads|artifacts)/"
+    r"(?P<name>(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)"
+    r"(?:\?revision=(?P<revision>[1-9][0-9]{0,17}))?(?:#L(?P<line>[1-9][0-9]{0,6}))?"
+)
+
+
+def file_citation(url: str) -> tuple[str | None, str, int | None, int | None] | None:
+    match = FILE_CITATION.fullmatch(url)
+    if not match:
+        return None
+    try:
+        name = unquote(match["name"], errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if not is_upload_name(name):
+        return None
+    if match["kind"] == "uploads":
+        if match["revision"] or not match["line"]:
+            return None
+    elif not match["revision"] or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(csv|md)", name):
+        return None
+    return match["task"], name, int(match["revision"] or 0) or None, int(match["line"] or 0) or None
 
 
 def is_upload_name(name: str) -> bool:
@@ -28,12 +50,8 @@ class ArtifactMarkdown(MarkdownIt):
             return True
         if re.fullmatch(r"\.\./prior-artifacts/[1-9][0-9]{0,18}(?:#L[1-9][0-9]{0,6})?", url):
             return True
-        citation = UPLOAD_CITATION.fullmatch(url)
-        if citation:
-            try:
-                return is_upload_name(unquote(citation[1], errors="strict"))
-            except UnicodeDecodeError:
-                return False
+        if file_citation(url):
+            return True
 
         try:
             target = urlsplit(url)

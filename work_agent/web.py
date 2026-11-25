@@ -19,8 +19,10 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .note_pages import install_note_pages
 from .artifact_preview import is_upload_name, markdown_preview
 from .connected_sources import ConnectedSources
+from .evidence_changes import AssignmentEvidenceChanges
 from .runner import AssignmentError, NeedsUserInput, OpenAIModel, run_assignment
 from .scheduling import PACIFIC, WEEKDAYS, format_pacific, parse_schedule_time, utc_now
 from .storage import (
@@ -33,7 +35,6 @@ MAX_FILE_BYTES = 128 * 1024
 MAX_REQUEST_CHARS = 8_000
 MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
 MAX_RECORD_NUMBER = 2**63 - 1
-METHOD_INDEX_LIMIT = 8
 MethodId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 ScheduleId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 logger = logging.getLogger(__name__)
@@ -67,16 +68,17 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                 yield
 
         try:
-            method_index = [
-                {field: method[field] for field in ("id", "title", "scope")}
-                for method in store.list_methods(limit=METHOD_INDEX_LIMIT)
-            ]
+            uploads = store.read_uploads(task_id)
+            prior_requests = [m["content"] for m in run["prior_messages"] if m["role"] == "user"]
+            method_index = store.relevant_methods(
+                run["request"], [*prior_requests[-1:], *prior_requests[:1], *(Path(name).stem for name in uploads)]
+            )
             try:
                 with (sources.open() if sources else nullcontext()) as catalog:
                     response = run_assignment(
                         model,
                         run["request"],
-                        store.read_uploads(task_id),
+                        uploads,
                         lambda name, content: store.stage(task_id, name, content, turn_id=turn_id),
                         lambda message: store.progress(task_id, message, turn_id=turn_id),
                         lambda step: store.record_step(task_id, step, turn_id=turn_id),
@@ -85,13 +87,22 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         saved_artifacts=run["artifacts"],
                         read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
                         prior_artifacts=run["prior_artifacts"],
+                        find_evidence_uses=lambda source, offset=0: store.find_evidence_uses(
+                            task_id, source, offset
+                        ),
                         read_prior_artifact=lambda reference_id: store.read_prior_artifact(task_id, reference_id),
-                        search_saved_work=lambda query, kind="any": store.search_saved_work(task_id, query, kind),
+                        search_saved_work=lambda query, kind="any", paraphrases=(): store.search_saved_work(
+                            task_id, query, kind, paraphrases
+                        ),
                         pin_saved_work=lambda source_task_id, name, revision: store.pin_saved_work(
                             task_id, source_task_id, name, revision
                         ),
                         tool_scope=tool_scope,
+                        project_note_store=store,
+                        task_id=task_id,
+                        stage_project_note=lambda **fields: store.stage_project_note(task_id, turn_id, **fields),
                         connected_catalog=catalog,
+                        change_tracker=AssignmentEvidenceChanges(store, task_id, turn_id),
                         method_index=method_index,
                         read_method=store.get_method,
                         stage_method=lambda title, scope, procedure, evidence: store.stage_method(
@@ -200,6 +211,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
     app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=APP_DIR / "templates")
+    install_note_pages(app, store, templates, check_form_origin, check_form_size)
 
     def render_index(request, *, prior_revision=None, error=None, draft="", status_code=200):
         return templates.TemplateResponse(
@@ -632,6 +644,22 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             raise HTTPException(404, "Source evidence not found.")
         return templates.TemplateResponse(
             request=request, name="source_evidence.html", context={"receipt": receipt, "task_id": task_id},
+        )
+
+    @app.get("/tasks/{task_id}/evidence-uses/{kind}/{name}")
+    def evidence_uses(request: Request, task_id: str, kind: str, name: str,
+                      revision: Annotated[int | None, Query(ge=1, le=MAX_RECORD_NUMBER)] = None,
+                      offset: Annotated[int, Query(ge=0, le=MAX_RECORD_NUMBER - 100)] = 0):
+        if kind == "upload" and revision is None and store.read_upload(task_id, name) is not None:
+            source = request.url_for("uploaded_source", task_id=task_id, name=quote(name, safe=""))
+        elif kind == "artifact" and revision and store.artifact_revision(task_id, name, revision) is not None:
+            source = request.url_for("artifact", task_id=task_id, name=name).include_query_params(revision=revision)
+        else:
+            raise HTTPException(404, "Evidence source not found.")
+        return templates.TemplateResponse(
+            request=request, name="evidence_uses.html",
+            context={"name": name, "revision": revision, "source": source,
+                     **store.evidence_uses(task_id, name, revision, offset)},
         )
 
     @app.get("/tasks/{task_id}/uploads/{name}")

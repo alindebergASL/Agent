@@ -9,6 +9,9 @@ from decimal import Decimal, DecimalException, localcontext
 
 from openai import APIError, OpenAI
 
+from .methods import method_page
+from .calculation_evidence import CONDITION_PROPERTIES, INPUT_PROPERTIES, calculate_with_evidence
+from . import cited_evidence, evidence_changes, note_tools
 from .research import WEB_SEARCH_TOOL, web_search_observations
 
 
@@ -35,6 +38,13 @@ INSTRUCTIONS = (
     "to batch the reads with read_file. Keep file IDs and line numbers in the program "
     "result. Use direct calls for single reads and when independent batching does not help. "
     "Call calculate and write_artifact directly. "
+    "When a document controls a decision, quote or cite its operative condition next to the "
+    "action it controls. Account for scope, exceptions and effective dates. When evidence "
+    "changes, revisit affected conclusions, explain whether each changes or holds and why, "
+    "and retain the earlier rationale and evidence. For arithmetic that depends on source "
+    "terms use calculate_with_evidence: read the lines first, bind the numeric inputs and "
+    "explain how often or under what condition each applies. Put user-supplied assumptions "
+    "such as counts directly in the expression. "
     "On a follow-up, use the latest user instructions and carry forward relevant prior instructions. "
     "Use read_saved_artifact in a program to analyze a saved revision alongside other sources. "
     "Before replacing a saved file, directly read every line of its current revision with read_saved_artifact. "
@@ -148,6 +158,21 @@ TOOLS = [
         {"expression": {"type": "string"}},
     ),
     _tool(
+        "calculate_with_evidence",
+        "Calculate with source-backed variables. Bind each named value to a numbered line from an "
+        "earlier read, explaining the condition that governs its use. For current uploads use "
+        "../uploads/URL-encoded-filename#LN, for pinned sources use revision_url#LN, and for "
+        "current published files use ../artifacts/URL-encoded-filename?revision=R#LN. "
+        "Include additional governing passages in conditions, even when they contain no numbers.",
+        {"expression": {"type": "string"}, "inputs": {"type": "array", "items": {
+            "type": "object", "properties": INPUT_PROPERTIES, "required": list(INPUT_PROPERTIES),
+            "additionalProperties": False,
+        }}, "conditions": {"type": "array", "items": {
+            "type": "object", "properties": CONDITION_PROPERTIES, "required": list(CONDITION_PROPERTIES),
+            "additionalProperties": False,
+        }}},
+    ),
+    _tool(
         "write_artifact",
         "Stage a CSV or Markdown file for publication when the assignment completes.",
         {
@@ -191,13 +216,31 @@ READ_PRIOR_ARTIFACT = _tool(
 )
 SEARCH_SAVED_WORK = _tool(
     "search_saved_work",
-    "Find original uploads and published artifacts from earlier assignments by filename or request keywords. "
-    "Results identify the file kind. Use open_saved_work to select a matching candidate.",
+    "Find original uploads and published artifacts from earlier assignments by filename, request, or evidence in the document. "
+    "A passage gives line numbers and context. Open the candidate and read those lines before citing.",
     {
-        "query": {"type": "string", "description": "A filename or a few distinctive words. All words must match."},
+        "query": {"type": "string", "description": "A filename, an exact identifier, or distinctive words from the question."},
+        "paraphrases": {"type": "array", "items": {"type": "string"},
+                        "description": "Up to three equivalent source-language phrases for conceptual queries, e.g. freight charge, delivery fee. Use [] for exact identifiers and filenames."},
         "kind": {"type": "string", "enum": ["any", "upload", "artifact"],
                  "description": "Choose upload for original attachments, artifact for generated files, or any for both."},
     },
+)
+FIND_EVIDENCE_USES = _tool(
+    "find_evidence_uses",
+    "Trace which published report revisions cite a current file or a selected earlier file. Use this when evidence "
+    "changes or the user asks what relied on it. Indirect review candidates cite an intermediate report revision "
+    "(via). Check both links before revising a conclusion. A pin or read alone does not establish reliance. "
+    "Open a returned candidate to check its reasoning. Use next_offset for more results.",
+    {"source": {"anyOf": [
+        {"type": "integer", "description": "A delivered reference_id for a selected earlier file."},
+        {"type": "object", "properties": {"upload": {"type": "string"}}, "required": ["upload"],
+         "additionalProperties": False, "description": "The exact filename from uploaded_files."},
+        {"type": "object", "properties": {"artifact": {"type": "string"}, "revision": {"type": "integer"}},
+         "required": ["artifact", "revision"], "additionalProperties": False,
+         "description": "A generated filename and the exact revision listed in saved_artifacts."},
+    ]},
+     "offset": {"type": "integer", "description": "Start at 0 or use the returned next_offset."}},
 )
 OPEN_SAVED_WORK = _tool(
     "open_saved_work",
@@ -209,6 +252,11 @@ READ_METHOD = _tool(
     "read_method",
     "Read the scope and procedure of a reusable method from the saved_methods index.",
     {"method_id": {"type": "integer", "description": "A method ID from the index."}},
+)
+LIST_MORE_METHODS = _tool(
+    "list_more_methods",
+    "Continue the ranked index of matching method titles and scopes when earlier candidates do not fit.",
+    {"offset": {"type": "integer", "description": "The next_method_offset from the preceding page."}},
 )
 STAGE_RECOVERY_METHOD = _tool(
     "stage_recovery_method",
@@ -230,9 +278,22 @@ STAGE_RECOVERY_METHOD = _tool(
         "corrected_artifact": {"type": "string", "description": "Exact filename of the staged corrected artifact."},
     },
 )
-TOOL_NAMES = {
+NOTE_TOOLS = note_tools.schemas(_tool)
+READ_CITED = _tool(
+    "read_cited_evidence", "Open an exact workspace source URL returned by a project note, evidence "
+    "relationship or evidence-usage lookup. Use start_line 0 for the cited line. "
+    "For a file, cite its returned revision_url with a line anchor.",
+    {"source_url": {"type": "string"}, "start_line": {"type": "integer"}, "line_count": {"type": "integer"}},
+)
+STAGE_EVIDENCE_CHANGE = _tool(
+    "stage_evidence_change",
+    "Record how a new source supersedes, qualifies or contradicts an earlier source within an explicit scope.",
+    evidence_changes.TOOL_PARAMETERS,
+)
+NOTE_TOOL_NAMES = {tool["name"] for tool in NOTE_TOOLS}
+TOOL_NAMES = NOTE_TOOL_NAMES | {"stage_evidence_change", "read_cited_evidence"} | {
     tool["name"] for tool in (*TOOLS, READ_SAVED_ARTIFACT, READ_PRIOR_ARTIFACT, SEARCH_SAVED_WORK,
-                              OPEN_SAVED_WORK, READ_METHOD, STAGE_RECOVERY_METHOD)
+                              OPEN_SAVED_WORK, FIND_EVIDENCE_USES, READ_METHOD, LIST_MORE_METHODS, STAGE_RECOVERY_METHOD)
 }
 PROGRAM_TOOLS = {"read_file", "read_saved_artifact", "read_prior_artifact", "search_saved_work", "open_saved_work"}
 MAX_TOOL_CALLS = 48
@@ -295,11 +356,12 @@ class OpenAIModel:
         return response.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
-def _calculate(expression: str) -> str:
+def _calculate(expression: str, variables: dict[str, Decimal] | None = None) -> str:
     if not isinstance(expression, str) or not 1 <= len(expression) <= 200:
         raise ValueError("Use an arithmetic expression of up to 200 characters.")
     expression = expression.strip()
     operations = 0
+    used = set()
 
     def evaluate(node):
         nonlocal operations
@@ -308,6 +370,9 @@ def _calculate(expression: str) -> str:
             raise ValueError("The arithmetic expression has too many terms.")
         if isinstance(node, ast.Constant) and type(node.value) in (int, float):
             value = Decimal(ast.get_source_segment(expression, node))
+        elif isinstance(node, ast.Name) and variables is not None and node.id in variables:
+            used.add(node.id)
+            value = variables[node.id]
         elif isinstance(node, ast.BinOp) and type(node.op) in OPERATORS:
             value = OPERATORS[type(node.op)](evaluate(node.left), evaluate(node.right))
         elif isinstance(node, ast.UnaryOp) and type(node.op) in OPERATORS:
@@ -324,6 +389,8 @@ def _calculate(expression: str) -> str:
         with localcontext() as context:
             context.prec = 28
             result = evaluate(ast.parse(expression, mode="eval").body)
+            if variables is not None and used != variables.keys():
+                raise ValueError("Use every bound input in the calculation.")
     except (SyntaxError, DecimalException) as exc:
         raise ValueError("Invalid arithmetic expression or division by zero.") from exc
     return format(result, "f") if result else "0"
@@ -406,9 +473,13 @@ def _dispatch(
     read_indexed_method: Callable[[int], dict | None],
     stage_recovery_method: Callable[[dict], dict] | None,
     read_prior_page: Callable[[int, int, int], dict],
-    find_candidates: Callable[[str, str], dict],
+    find_candidates: Callable[..., dict],
     open_candidate: Callable[[int], dict],
     connected_read: Callable[[str, dict], dict] | None = None,
+    *,
+    evidence_uses: Callable[..., dict] | None = None,
+    list_methods_page: Callable[[int], dict] | None = None,
+    source_lines=None, change_tracker=None, read_cited=None,
 ):
     try:
         arguments = json.loads(call["arguments"])
@@ -441,10 +512,19 @@ def _dispatch(
             )
         if name == "read_prior_artifact" and arguments.keys() == {"reference_id", "start_line", "line_count"}:
             return read_prior_page(**arguments)
-        if name == "search_saved_work" and arguments.keys() in ({"query"}, {"query", "kind"}):
-            return find_candidates(arguments["query"], arguments.get("kind", "any"))
+        if name == "search_saved_work" and "query" in arguments and arguments.keys() <= {"query", "kind", "paraphrases"}:
+            return find_candidates(arguments["query"], arguments.get("kind", "any"), arguments.get("paraphrases", []))
+        if name == "find_evidence_uses":
+            if evidence_uses is None:
+                raise ValueError("Evidence tracing is unavailable.")
+            if arguments.keys() in ({"source"}, {"source", "offset"}):
+                return evidence_uses(**arguments)
+            if arguments.keys() in ({"reference_id"}, {"reference_id", "offset"}):
+                return evidence_uses(arguments["reference_id"], arguments.get("offset", 0))
         if name == "open_saved_work" and arguments.keys() == {"candidate_id"}:
             return open_candidate(arguments["candidate_id"])
+        if name == "list_more_methods" and arguments.keys() == {"offset"} and list_methods_page:
+            return list_methods_page(arguments["offset"])
         if name == "read_method" and arguments.keys() == {"method_id"}:
             method_id = arguments["method_id"]
             method = read_indexed_method(method_id) if type(method_id) is int else None
@@ -455,8 +535,16 @@ def _dispatch(
             if stage_recovery_method is None:
                 raise ValueError("Saving recovery methods is unavailable in this run.")
             return stage_recovery_method(arguments)
+        if name == "stage_evidence_change" and change_tracker is not None:
+            return change_tracker.stage(arguments, source_lines or {})
+        if name == "read_cited_evidence" and read_cited is not None:
+            return read_cited(arguments)
         if name == "calculate" and arguments.keys() == {"expression"}:
             return {"result": _calculate(arguments["expression"])}
+        if name == "calculate_with_evidence" and arguments.keys() in (
+            {"expression", "inputs"}, {"expression", "inputs", "conditions"},
+        ):
+            return calculate_with_evidence(**arguments, receipts=source_lines or {}, calculate=_calculate)
         if name == "write_artifact" and arguments.keys() == {"name", "content"}:
             filename, content = arguments["name"], arguments["content"]
             if not isinstance(filename, str) or not isinstance(content, str):
@@ -490,12 +578,17 @@ def run_assignment(
     saved_artifacts: Mapping[str, dict] | None = None,
     read_saved_artifact: Callable[[str], bytes | None] | None = None,
     prior_artifacts: list[dict] | None = None,
+    find_evidence_uses: Callable[..., dict] | None = None,
     read_prior_artifact: Callable[[int], bytes | None] | None = None,
     search_saved_work: Callable[..., list[dict]] | None = None,
     pin_saved_work: Callable[[str, str, int | None], dict] | None = None,
     method_index: list[dict] | None = None,
     read_method: Callable[[int], dict | None] | None = None,
     stage_method: Callable[[str, str, str, str], None] | None = None,
+    project_note_store=None,
+    task_id: str | None = None,
+    stage_project_note=None,
+    change_tracker: evidence_changes.AssignmentEvidenceChanges | None = None,
     connected_catalog=None,
     tool_scope: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> str:
@@ -509,8 +602,25 @@ def run_assignment(
     methods = [
         {key: item[key] for key in ("id", "title", "scope")} for item in method_index or ()
     ]
-    method_ids = {method["id"] for method in methods}
+    first_method_page = method_page(methods, 0) if methods else {}
+    method_ids = {m["id"] for m in first_method_page.get("saved_methods", [])}
+    available_offsets = set()
+
+    def list_methods_page(offset):
+        if type(offset) is not int or offset not in available_offsets:
+            raise ValueError("Choose a next_method_offset returned by an earlier page.")
+        page = method_page(methods, offset)
+        method_ids.update(m["id"] for m in page["saved_methods"])
+        if "next_method_offset" in page:
+            available_offsets.add(page["next_method_offset"])
+        return page
+
     tools = RESPONSES_TOOLS.copy()
+    if change_tracker is not None:
+        tools.append(STAGE_EVIDENCE_CHANGE)
+    if project_note_store is not None and stage_project_note is not None:
+        tools.extend(NOTE_TOOLS)
+        tools.append(READ_CITED)
     if saved_artifacts:
         tools.append({**READ_SAVED_ARTIFACT, "allowed_callers": ["direct", "programmatic"]})
     if references or discovery_enabled:
@@ -518,8 +628,13 @@ def run_assignment(
     if discovery_enabled:
         tools.extend({**tool, "allowed_callers": ["direct", "programmatic"]}
                      for tool in (SEARCH_SAVED_WORK, OPEN_SAVED_WORK))
+    if find_evidence_uses is not None and discovery_enabled:
+        tools.append(FIND_EVIDENCE_USES)
     if methods:
         tools.append(READ_METHOD)
+    if "next_method_offset" in first_method_page:
+        available_offsets.add(first_method_page["next_method_offset"])
+        tools.append(LIST_MORE_METHODS)
     if stage_method is not None:
         tools.append(STAGE_RECOVERY_METHOD)
 
@@ -528,6 +643,10 @@ def run_assignment(
     tools.extend(connected_tools)
     warnings = connected_catalog.warnings if connected_catalog is not None else []
     instructions = INSTRUCTIONS
+    if change_tracker is not None:
+        instructions += evidence_changes.INSTRUCTIONS
+    if project_note_store is not None and stage_project_note is not None:
+        instructions += note_tools.INSTRUCTIONS
     if references or discovery_enabled:
         instructions += PRIOR_ARTIFACT_INSTRUCTIONS
     if discovery_enabled:
@@ -551,22 +670,52 @@ def run_assignment(
             reference["name"], reference, read_prior_artifact(reference_id), start_line, line_count
         )
 
-    def find_candidates(query: str, kind: str) -> dict:
+    def register_candidate(source_task_id, name, revision):
+        identity = (source_task_id, name, revision)
+        if identity not in candidates:
+            candidates.append(identity)
+        return candidates.index(identity) + 1
+
+    def find_candidates(query: str, kind: str, paraphrases: list[str]) -> dict:
         if not discovery_enabled:
             raise ValueError("Saved work search is unavailable.")
         if kind not in ("any", "upload", "artifact"):
             raise ValueError("Choose any, upload, or artifact for the file kind.")
-        results = search_saved_work(query) if kind == "any" else search_saved_work(query, kind)
+        if not isinstance(paraphrases, list) or len(paraphrases) > 3 or any(
+            not isinstance(phrase, str) or not 1 <= len(phrase.strip()) <= 200 for phrase in paraphrases
+        ):
+            raise ValueError("Supply up to three short alternative search phrases.")
+        if paraphrases:
+            results = search_saved_work(query, kind, paraphrases)
+        else:
+            results = search_saved_work(query) if kind == "any" else search_saved_work(query, kind)
         matches = []
         for row in results:
-            identity = (row["source_task_id"], row["name"], row["revision"])
-            if identity not in candidates:
-                candidates.append(identity)
+            candidate_id = register_candidate(row["source_task_id"], row["name"], row["revision"])
             description = {key: row[key] for key in ("name", "revision", "request", "created_at")}
+            if "passage" in row:
+                description["passage"] = row["passage"]
             matches.append({
-                "candidate_id": candidates.index(identity) + 1, "kind": row.get("kind", "artifact"), **description
+                "candidate_id": candidate_id, "kind": row.get("kind", "artifact"), **description
             })
         return {"candidates": matches}
+
+    def evidence_uses(source, offset: int = 0) -> dict:
+        valid = type(source) is int and source in delivered_refs
+        if isinstance(source, dict) and source.keys() == {"upload"}:
+            valid = isinstance(source["upload"], str) and source["upload"] in uploads
+        elif isinstance(source, dict) and source.keys() == {"artifact", "revision"}:
+            filename, revision = source["artifact"], source["revision"]
+            valid = (isinstance(filename, str) and filename in saved_artifacts and type(revision) is int
+                     and saved_artifacts[filename]["revision"] == revision)
+        if not valid or find_evidence_uses is None:
+            raise ValueError("Choose a listed original upload, listed saved revision, or delivered earlier reference ID.")
+        result = find_evidence_uses(source, offset)
+        indirect = result.get("indirect_review_candidates", [])
+        for row in [*result["citing_revisions"], *indirect, *(item["via"] for item in indirect)]:
+            if not row.get("same_assignment"):
+                row["candidate_id"] = register_candidate(row["source_task_id"], row["name"], row["revision"])
+        return result
 
     def open_candidate(candidate_id: int) -> dict:
         if not discovery_enabled or type(candidate_id) is not int or not 1 <= candidate_id <= delivered_candidates:
@@ -587,7 +736,7 @@ def run_assignment(
             {"name": name, **revision} for name, revision in saved_artifacts.items()
         ]
     if methods:
-        current_request["saved_methods"] = methods
+        current_request.update(first_method_page)
     history = [
         *({"type": "message", **message} for message in prior_messages or ()),
         {
@@ -600,6 +749,8 @@ def run_assignment(
     remaining_calls = MAX_TOOL_CALLS
     lines_read: dict[str, set[int]] = {}
     fully_read: set[str] = set()
+    source_lines = {}
+    disclosed_urls = set()
     verified_artifact: str | None = None
     for _ in range(16):
         if time.monotonic() >= deadline:
@@ -674,17 +825,32 @@ def run_assignment(
             verified_artifact = result["corrected_artifact"]
             return result
 
+        def read_cited(arguments):
+            result = cited_evidence.read_link(arguments, disclosed_urls, project_note_store,
+                                              task_id, pin_saved_work, _revision_page)
+            if "reference_id" in result:
+                references[result["reference_id"]] = {
+                    key: result[key] for key in ("reference_id", "revision", "revision_url", "source_task_id")
+                } | {"name": result["file_id"]}
+            return result
+
         def dispatch(call, connected_read=None):
+            if call.get("name") in NOTE_TOOL_NAMES and project_note_store is not None and stage_project_note is not None:
+                return note_tools.dispatch(call, history[:delivered], project_note_store, stage_project_note)
             return _dispatch(
                 call, uploads, stage_artifact, saved_artifacts, read_saved_artifact, fully_read,
                 read_indexed_method, stage_recovery_method if stage_method is not None else None,
                 read_prior_page, find_candidates, open_candidate, connected_read,
+                evidence_uses=evidence_uses, list_methods_page=list_methods_page, source_lines=source_lines, change_tracker=change_tracker,
+                read_cited=read_cited if project_note_store is not None else None,
             )
 
         # Parallel calls in this response have not received one another's handles.
         delivered_refs = set(references)
         delivered_candidates = len(candidates)
         completed_reads = set()
+        new_source_lines = {}
+        new_urls = set()
         mixed_question = len(calls) > 1 and any(call.get("name") == "request_user_input" for call in calls)
         for call in calls:
             if not call.get("call_id"):
@@ -712,6 +878,11 @@ def run_assignment(
                         result = {**result, "evidence_url": f"../evidence/{source_ref}"}
                 else:
                     result = dispatch(call)
+                    if change_tracker is not None:
+                        result = change_tracker.annotate(name, result)
+                    if name == "read_cited_evidence" and "data" in result:
+                        source_ref = uuid.uuid4().hex
+                        result = {**result, "evidence_url": f"../evidence/{source_ref}"}
                 receipt = {
                     "type": "function_call_output",
                     "call_id": call["call_id"],
@@ -729,6 +900,8 @@ def run_assignment(
             if tool_label == "request_user_input" and "question" in result:
                 raise NeedsUserInput(result["question"])
             program_caller = caller and caller["type"] == "program"
+            cited_evidence.remember_lines(new_source_lines, tool_label, result)
+            new_urls.update(cited_evidence.disclosed_sources(tool_label, result))
             if tool_label == "read_saved_artifact" and not program_caller and "lines" in result:
                 filename = result["file_id"]
                 coverage = lines_read.setdefault(filename, set())
@@ -750,4 +923,6 @@ def run_assignment(
                 progress(f"Running tool {tool_label}.")
         # The model cannot see receipts from this batch until the next invocation.
         fully_read.update(completed_reads)
+        source_lines.update(new_source_lines)
+        disclosed_urls.update(new_urls)
     raise AssignmentError("The assignment reached its model turn limit.")

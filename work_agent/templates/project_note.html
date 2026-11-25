@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ note.scope }} · Project notes{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('project_notes') }}">← Project notes</a>
+<section class="panel">
+  <h1>{{ note.scope }}</h1>
+  <p>Revision {{ note.revision }} · {{ note.author }} · <time datetime="{{ note.created_at }}">{{ note.created_at }}</time>{% if note.task_id %} · <a href="{{ url_for('assignment', task_id=note.task_id) }}">Source assignment</a>{% endif %}</p>
+  {% if note.reason %}<p class="prose">{{ note.reason }}</p>{% endif %}
+  <ol>
+  {% for claim in note.claims %}
+    <li id="claim-{{ loop.index }}">
+      <p class="prose">{{ claim.text }}</p>
+      {% if claim.supersedes %}<p><a href="?revision={{ note.previous_revision }}#claim-{{ claim.supersedes }}">Supersedes claim {{ claim.supersedes }} in revision {{ note.previous_revision }}</a></p>{% endif %}
+      <ul>
+      {% for source in claim.sources %}<li><a href="{{ source }}">{{ source.split('/')[-1] }}</a></li>{% endfor %}
+      </ul>
+    </li>
+  {% endfor %}
+  </ol>
+  {% if note.previous_revision %}<a href="?revision={{ note.previous_revision }}">Previous revision {{ note.previous_revision }}</a>{% endif %}
+  {% if historical %}<a href="{{ url_for('project_note', note_id=note.id) }}">Current revision</a>{% endif %}
+</section>
+{% if not historical %}
+<section class="panel">
+  <h2>Edit note</h2>
+  {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="expected_revision" value="{{ note.revision }}">
+    {% for claim in draft + [{'text': '', 'sources': []}] %}
+    <fieldset>
+      <legend>{% if loop.last %}Add a claim{% else %}Claim {{ loop.index }}{% endif %}</legend>
+      <label for="text-{{ loop.index }}">Claim</label>
+      <textarea id="text-{{ loop.index }}" name="claim" rows="2">{{ claim.text }}</textarea>
+      <label for="sources-{{ loop.index }}">Evidence URLs, one per line</label>
+      <textarea id="sources-{{ loop.index }}" name="sources" rows="2">{{ claim.sources|join('\n') }}</textarea>
+      <label for="supersedes-{{ loop.index }}">Earlier claim this replaces, if any</label>
+      <input id="supersedes-{{ loop.index }}" type="number" min="1" max="{{ note.claims|length }}" name="supersedes" value="{% if error and claim.supersedes %}{{ claim.supersedes }}{% endif %}">
+    </fieldset>
+    {% endfor %}
+    <label for="reason">What changed and why?</label>
+    <textarea id="reason" name="reason" required>{{ reason }}</textarea>
+    <button type="submit">Save new revision</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
