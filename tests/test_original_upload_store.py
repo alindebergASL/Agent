@@ -50,7 +50,7 @@ class OriginalUploadTests(unittest.TestCase):
         hit, = self.store.search_saved_work(target, "boston cafe")
         self.assertEqual((hit["source_task_id"], hit["kind"], hit["name"]), (source, "upload", name))
         self.assertIn("Boston", hit["request"])
-        self.assertEqual(self.store.search_saved_work(target, "only-inside"), [])
+        self.assertEqual(self.store.search_saved_work(target, "only-inside")[0]["passage"]["text"], "only-inside")
         self.assertEqual(self.store.get_task(target)["uploads"], [])
         ref, = self.store.get_task(target)["prior_artifacts"]
         self.assertEqual(self.store.read_prior_artifact(target, ref["reference_id"]), b"only-inside\r\n")

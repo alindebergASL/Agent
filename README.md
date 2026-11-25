@@ -69,7 +69,11 @@ Each new occurrence can read the revision of the previous brief that was current
 
 ## Find a file from earlier work
 
-To reuse earlier work, start a new assignment and refer to an original upload or generated file by name or by words from its assignment. For example, ask for the supplier quotes you uploaded last week. The agent can open the original sources, cite their rows, and save a new comparison. You can also start a new assignment directly from an open upload or saved revision. [Try the meeting-brief, CSV, and original-quote examples](docs/find-saved-work.md).
+To reuse earlier work, describe an original upload or generated file by name, assignment, or a passage you remember. The agent can find the passage, open the exact version and cite its rows. You can also start a new assignment directly from an open upload or saved revision. [Try the meeting-brief, CSV, and original-quote examples](docs/find-saved-work.md).
+
+## Revisit a decision
+
+Ask the agent to maintain a shared project or account note and cite the evidence behind each claim. In a fresh assignment, provide an amendment or conflicting source and ask what changes, what still holds, and why. Open **Project notes** to read or edit the current decision and follow a superseded claim back to its sources. An upload's **Where this original was used** link and a saved file's **Where this revision was used** link trace the work that cited it. [Knowledge foundation and verification](docs/knowledge-foundation.md).
 
 ## Run the quote demonstration
 
@@ -122,7 +126,7 @@ Closing the browser leaves the app working. If the app restarts during a turn, r
 
 Check the result of a completed assignment, then choose **Save reusable method**. Give it a short title, describe when it applies, and write the procedure and the evidence you checked. Keep prices, decisions, and notes specific to that assignment out of the reusable procedure.
 
-The **Saved methods** page lets you inspect, edit, or remove a method and open its source assignment. New runs see a short index of the eight most recently updated methods. When the agent retrieves one, its activity and run history show the retrieval. The agent gets the procedure and scope while the evidence and source assignment remain available to you from the method page.
+The **Saved methods** page lets you inspect, edit, or remove a method and open its source assignment. For each turn, the worker searches all method titles and scopes and ranks matches by relevance. The model can page through matching summaries, then read a procedure that fits. When the agent retrieves one, its activity and run history show the retrieval. The agent gets the procedure and scope while the evidence and source assignment remain available to you from the method page. [Method selection and paired evaluation](docs/method-selection.md)
 
 The quote demonstration can also run against the offline Responses fixture. Use a separate Compose project so its saved assignments and model configuration stay separate from live runs.
 

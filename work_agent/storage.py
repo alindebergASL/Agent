@@ -7,6 +7,10 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .methods import initialize_method_search, ranked_methods
+from . import project_notes
+from . import evidence_changes, evidence_links
+from . import passages
 from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
 
 
@@ -153,7 +157,7 @@ class InactiveTurn(RuntimeError):
     """The worker's turn is no longer the active running turn."""
 
 
-class Store:
+class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore):
     def __init__(self, root: Path):
         self.root = Path(root)
 
@@ -177,7 +181,7 @@ class Store:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version < SCHEMA_VERSION:
                 self._upgrade_turn_schema(connection)
-            for statement in SCHEMA.split(";"):
+            for statement in (SCHEMA + project_notes.SCHEMA + evidence_changes.SCHEMA).split(";"):
                 if statement.strip():
                     connection.execute(statement)
             if version < SCHEMA_VERSION:
@@ -228,7 +232,11 @@ class Store:
                        SELECT reference_id, task_id, source_task_id, name, revision FROM prior_artifacts_legacy"""
                 )
                 connection.execute("DROP TABLE prior_artifacts_legacy")
+            initialize_method_search(connection)
+            evidence_links.initialize(connection, self._upload_bytes)
             self._initialize_saved_work_search(connection)
+            passages.initialize(connection)
+            passages.refresh(connection, self._upload_bytes)
             connection.execute(
                 "UPDATE turns SET status = 'interrupted', error = ? WHERE status = 'running'",
                 (INTERRUPTED,),
@@ -237,7 +245,9 @@ class Store:
                 "UPDATE tasks SET status = 'interrupted', error = ? WHERE status = 'running'",
                 (INTERRUPTED,),
             )
-            for table in ("staged_artifacts", "staged_methods"):
+            connection.execute("""DELETE FROM evidence_changes WHERE published=0 AND turn_id IN
+                               (SELECT id FROM turns WHERE status='interrupted')""")
+            for table in ("staged_artifacts", "staged_methods", "staged_project_notes"):
                 connection.execute(
                     f"DELETE FROM {table} WHERE turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')"
                 )
@@ -473,11 +483,15 @@ class Store:
             rows = self._prior_artifacts(connection, task_id, reference_id)
             return rows[0] if rows else None
 
-    def search_saved_work(self, task_id: str, query: str, kind: str = "any") -> list[dict]:
+    def search_saved_work(self, task_id: str, query: str, kind: str = "any", paraphrases=()) -> list[dict]:
         if kind not in ("any", "upload", "artifact"):
             raise ValueError("Choose upload, artifact, or any as the file kind.")
         if not isinstance(query, str) or len(query) > 200:
             raise ValueError("Search with up to 200 characters of keywords or a filename.")
+        if not isinstance(paraphrases, (list, tuple)) or len(paraphrases) > 3 or any(
+            not isinstance(phrase, str) or not 1 <= len(phrase.strip()) <= 200 for phrase in paraphrases
+        ):
+            raise ValueError("Supply up to three short alternative search phrases.")
         terms = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", query))
         if not terms:
             # Valid upload names may consist entirely of symbols, which FTS does not tokenize.
@@ -495,8 +509,15 @@ class Store:
                 return [dict(row) for row in rows]
             raise ValueError("Search with a keyword or exact filename.")
         # Treat punctuation and FTS operators as user input. Every term must match.
-        match = " AND ".join(f'"{term}"' for term in dict.fromkeys(terms))
+        match = passages.match_expression(terms)
         with self._connection() as connection:
+            # Pending writes are indexed once, under a writer lock. Each search
+            # sees metadata and passages from one consistent source snapshot.
+            connection.execute("BEGIN")
+            if connection.execute("SELECT 1 FROM passage_files WHERE dirty=1 LIMIT 1").fetchone():
+                connection.rollback()
+                connection.execute("BEGIN IMMEDIATE")
+                passages.refresh(connection, self._upload_bytes)
             rows = connection.execute(
                 """SELECT hit.source_task_id, hit.name, hit.kind,
                        CASE WHEN hit.kind = 'artifact' THEN (SELECT MAX(revision) FROM artifact_revisions
@@ -510,7 +531,7 @@ class Store:
                             task.created_at DESC, task.rowid DESC, hit.name, hit.kind LIMIT 8""",
                 (match, task_id, kind, kind, query.strip()),
             )
-            return [dict(row) for row in rows]
+            return list(passages.search(connection, task_id, kind, terms, rows, query, paraphrases))
 
     def _pin_saved_work(self, connection, task_id: str, source_task_id: str, name: str, revision: int | None) -> dict:
         if not isinstance(source_task_id, str) or task_id == source_task_id or not isinstance(name, str):
@@ -896,7 +917,10 @@ class Store:
             ).fetchone()
         if row is None:
             return None
-        return self._upload_bytes(task_id, row)
+        try:
+            return self._upload_bytes(task_id, row)
+        except FileNotFoundError:
+            return None
 
     def _running_turn(self, connection: sqlite3.Connection, task_id: str, turn_id: int | None) -> int:
         row = self._latest_turn(connection, task_id)
@@ -948,6 +972,8 @@ class Store:
     def _discard_drafts(self, connection: sqlite3.Connection, turn_id: int) -> None:
         connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM staged_methods WHERE turn_id = ?", (turn_id,))
+        connection.execute("DELETE FROM staged_project_notes WHERE turn_id = ?", (turn_id,))
+        connection.execute("DELETE FROM evidence_changes WHERE turn_id=? AND published=0", (turn_id,))
 
     def progress(self, task_id: str, message: str, *, turn_id: int | None = None) -> None:
         with self._connection() as connection:
@@ -961,10 +987,47 @@ class Store:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             active = self._running_turn(connection, task_id, turn_id)
-            connection.execute(
+            cursor = connection.execute(
                 "INSERT INTO run_steps (task_id, payload, turn_id) VALUES (?, ?, ?)",
                 (task_id, json.dumps(step), active),
             )
+            evidence_links.record_read(connection, task_id, active, step, cursor.lastrowid)
+
+    def evidence_uses(self, source_task_id: str, name: str, revision: int | None, offset: int = 0) -> dict:
+        with self._connection() as connection:
+            pending = revision is None and connection.execute("""SELECT 1 FROM pending_upload_citations
+                WHERE source_task_id=? AND source_name=? LIMIT 1""", (source_task_id, name)).fetchone()
+            if pending:
+                connection.execute("BEGIN IMMEDIATE")
+                evidence_links.resolve_pending(connection, self._upload_bytes, source_task_id, name)
+            else:
+                connection.execute("BEGIN")
+            result = evidence_links.uses(connection, source_task_id, name, revision, offset)
+        changes = self.evidence_changes(source_task_id, name, revision, offset)
+        result["evidence_changes"] = changes["changes"]
+        result["next_offset"] = result["next_offset"] or changes["next_offset"]
+        return result
+
+    def find_evidence_uses(self, task_id: str, source: int | dict, offset: int = 0) -> dict:
+        if type(source) is int:
+            pin = self.prior_artifact(task_id, source)
+            if pin is None:
+                raise ValueError("Choose an earlier file pinned to this assignment.")
+            target = pin["source_task_id"], pin["name"], pin["revision"]
+        elif isinstance(source, dict) and source.keys() == {"upload"} and isinstance(source["upload"], str):
+            target = task_id, source["upload"], None
+        elif (isinstance(source, dict) and source.keys() == {"artifact", "revision"}
+              and isinstance(source["artifact"], str) and type(source["revision"]) is int
+              and 0 < source["revision"] < 2**63):
+            target = task_id, source["artifact"], source["revision"]
+        else:
+            raise ValueError("Choose an original upload, an exact saved revision, or a pinned file.")
+        result = self.evidence_uses(*target, offset)
+        for row in result["citing_revisions"] + result["indirect_review_candidates"]:
+            row["same_assignment"] = row["source_task_id"] == task_id
+            if "via" in row:
+                row["via"]["same_assignment"] = row["via"]["source_task_id"] == task_id
+        return result
 
     def source_evidence(self, task_id: str, source_ref: str) -> dict | None:
         if not re.fullmatch(r"[a-f0-9]{32}", source_ref):
@@ -1032,6 +1095,10 @@ class Store:
                 """,
                 ((task_id, draft["name"], draft["current"] + 1, draft["content"], active) for draft in drafts),
             )
+            for draft in drafts:
+                evidence_links.index_report(
+                    connection, self._upload_bytes, task_id, draft["name"], draft["current"] + 1, draft["content"]
+                )
             connection.execute(
                 """
                 INSERT INTO saved_methods (source_task_id, title, scope, procedure, evidence, updated_at)
@@ -1039,6 +1106,11 @@ class Store:
                 """,
                 (task_id, self._method_timestamp(), active),
             )
+            try:
+                project_notes.publish_notes(connection, task_id, active)
+                connection.execute("UPDATE evidence_changes SET published=1 WHERE turn_id=?", (active,))
+            except project_notes.NoteConflict as exc:
+                raise RevisionConflict(str(exc)) from exc
             self._discard_drafts(connection, active)
             connection.execute(
                 "UPDATE turns SET status = 'completed', response = ? WHERE id = ?", (response, active)
@@ -1116,6 +1188,7 @@ class Store:
                 """,
                 (task_id, name, revision, data),
             )
+            evidence_links.index_report(connection, self._upload_bytes, task_id, name, revision, data)
             return revision
 
     def read_artifact(self, task_id: str, name: str) -> bytes | None:
@@ -1161,6 +1234,15 @@ class Store:
                 (limit if limit is not None else -1,),
             )
             return [dict(row) for row in rows]
+
+    def relevant_methods(self, request: str, context: list[str]) -> list[dict]:
+        with self._connection() as connection:
+            matches = ranked_methods(connection, request)
+            if context:
+                current_ids = {method["id"] for method in matches}
+                matches.extend(method for method in ranked_methods(connection, " ".join(context))
+                               if method["id"] not in current_ids)
+            return matches
 
     def get_method(self, method_id: int) -> dict | None:
         with self._connection() as connection:

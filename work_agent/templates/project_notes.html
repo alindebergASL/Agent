@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Project notes · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('index') }}">← Assignments</a>
+<section class="panel">
+  <h1>Project notes</h1>
+  <form method="get">
+    <label for="scope">Account or project</label>
+    <input id="scope" name="q" value="{{ q }}">
+    <button>Find notes</button>
+  </form>
+  <ul class="entries">
+  {% for note in notes %}
+    <li><a href="{{ url_for('project_note', note_id=note.id) }}">{{ note.scope }}</a> · Revision {{ note.revision }}</li>
+  {% else %}
+    <li>{% if q %}No matching notes.{% else %}Ask the agent to maintain a note for an account or project.{% endif %}</li>
+  {% endfor %}
+  </ul>
+</section>
+{% endblock %}

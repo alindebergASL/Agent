@@ -18,7 +18,7 @@ class SavedWorkSearchTests(unittest.TestCase):
         self.store.complete(task, "Saved")
         return task
 
-    def test_search_indexes_only_published_names_and_requests_in_other_assignments(self):
+    def test_search_indexes_published_content_and_requests_in_other_assignments(self):
         iowa = self.publish("Prepare for meeting at the University of Iowa.", content="private-onlyphrase")
         state = self.publish("Make a general plan.", name="plan.md")
         self.store.follow_up(state, "Prépare the Iowa State engineering briefing.")
@@ -36,7 +36,7 @@ class SavedWorkSearchTests(unittest.TestCase):
         result, = query(current, 'state:briefing "prepare"')
         self.assertEqual((result["source_task_id"], result["name"], result["revision"]), (state, "brief.md", 1))
         self.assertIn("Prépare", result["request"])
-        self.assertEqual(query(current, "private-onlyphrase"), [])
+        self.assertEqual(query(current, "private-onlyphrase")[0]["passage"]["text"], "private-onlyphrase")
         self.assertEqual(query(current, "draft.md"), [])
         self.assertEqual(self.store.get_task(current)["prior_artifacts"], [])
         for invalid in (None, "", '"-*', "a" * 201):

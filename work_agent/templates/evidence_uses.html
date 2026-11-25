@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Evidence use · {{ name }}{% endblock %}
+{% block body %}
+<a class="back" href="{{ source }}">← {{ name }}{% if revision %}, revision {{ revision }}{% endif %}</a>
+<section class="panel">
+  <h1>Where this evidence was used</h1>
+  {% if evidence_changes %}<h2>Changes to the evidence</h2>
+  <ul>{% for change in evidence_changes %}
+    <li>{{ change.scope }} · <a href="{{ change.new_source }}">New evidence</a> {{ change.relationship }}
+    <a href="{{ change.earlier_source }}">earlier evidence</a>. {{ change.reason }}
+    <a href="{{ change.assignment_url }}">Assignment</a></li>
+  {% endfor %}</ul>{% endif %}
+  <h2>Citing report revisions</h2>
+  <ul>{% for row in citing_revisions %}
+    <li><a href="{{ url_for('artifact', task_id=row.source_task_id, name=row.name) }}?revision={{ row.revision }}">{{ row.name }}, revision {{ row.revision }}</a>
+      ({{ "current" if row.current else "historical" }}) ·
+      {% for line in row.lines %}<a href="{{ source }}{% if line %}#L{{ line }}{% endif %}">{% if line %}Line {{ line }}{% else %}Whole file{% endif %}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+    </li>
+  {% else %}<li>No published report citations on this page.</li>{% endfor %}</ul>
+  {% if indirect_review_candidates %}<h2>Indirect decisions to review</h2>
+  <ul>{% for row in indirect_review_candidates %}
+    <li><a href="{{ url_for('artifact', task_id=row.source_task_id, name=row.name) }}?revision={{ row.revision }}">{{ row.name }}, revision {{ row.revision }}</a>
+    cites <a href="{{ url_for('artifact', task_id=row.via.source_task_id, name=row.via.name) }}?revision={{ row.via.revision }}">{{ row.via.name }}, revision {{ row.via.revision }}</a>,
+    which cites this source.</li>
+  {% endfor %}</ul>{% endif %}
+  {% if note_claims %}<h2>Project note claims</h2>
+  <ul>{% for row in note_claims %}
+    <li><a href="{{ row.note_url }}">{{ row.scope }}, revision {{ row.revision }}</a> · {{ row.claim.text }}
+      {% if row.current_revision != row.revision %} · <a href="/notes/{{ row.note_id }}">Current revision {{ row.current_revision }}</a>{% endif %}
+      {% if row.reason %}<div>{{ row.reason }}</div>{% endif %}</li>
+  {% endfor %}</ul>{% endif %}
+  <h2>Assignments that selected or read the file</h2>
+  <ul>{% for row in related_assignments %}
+    <li><a href="{{ url_for('assignment', task_id=row.task_id) }}">Assignment {{ row.task_id[:8] }}</a> ·
+      {% if row.pinned %}Selected{% endif %}{% if row.pinned and row.read %}, {% endif %}{% if row.read %}Read{% endif %}</li>
+  {% else %}<li>No recorded selections or reads on this page.</li>{% endfor %}</ul>
+  {% if next_offset is not none %}<a href="?{% if revision %}revision={{ revision }}&amp;{% endif %}offset={{ next_offset }}">More uses</a>{% endif %}
+</section>
+{% endblock %}
