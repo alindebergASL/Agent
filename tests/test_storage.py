@@ -121,7 +121,7 @@ class StorageTests(unittest.TestCase):
                 INSERT INTO tasks VALUES ('old', 'Make a report.', 'running', 'one', NULL, NULL);
                 INSERT INTO turns VALUES (7, 'old', 'Make a report.', 'completed', 'one', 'Saved.', NULL);
                 INSERT INTO turns VALUES (8, 'old', 'Add one row.', 'running', 'two', NULL, NULL);
-                INSERT INTO uploads VALUES ('old', 0, 'source.csv');
+                INSERT INTO uploads (task_id, position, name) VALUES ('old', 0, 'source.csv');
                 INSERT INTO run_steps VALUES (1, 'old', '{"phase":"work"}', 8);
                 INSERT INTO events VALUES (1, 'old', 'Read source.', 8);
                 INSERT INTO artifact_revisions VALUES ('old', 'report.md', 1, 'agent', x'610d0a', 7);

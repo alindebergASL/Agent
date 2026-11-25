@@ -11,20 +11,23 @@ from threading import Event, Lock, Thread
 from typing import Annotated
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Path as RoutePath, Query, Request
+from fastapi import FastAPI, Path as RoutePath, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.datastructures import UploadFile
+from starlette.datastructures import FormData, UploadFile
+from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .artifact_preview import is_upload_name, markdown_preview
-from .runner import AssignmentError, OpenAIModel, run_assignment
+from .runner import AssignmentError, NeedsUserInput, OpenAIModel, run_assignment
 from .scheduling import PACIFIC, WEEKDAYS, format_pacific, parse_schedule_time, utc_now
-from .storage import InactiveTurn, MAX_ARTIFACT_BYTES, MAX_SCHEDULE_REQUEST_CHARS, METHOD_FIELD_LIMITS, RevisionConflict, Store
+from .storage import (
+    InactiveTurn, MAX_ARTIFACT_BYTES, MAX_FILES, MAX_SCHEDULE_REQUEST_CHARS, METHOD_FIELD_LIMITS,
+    RevisionConflict, Store,
+)
 
 APP_DIR = Path(__file__).parent
-MAX_FILES = 8
 MAX_FILE_BYTES = 128 * 1024
 MAX_REQUEST_CHARS = 8_000
 MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
@@ -67,24 +70,29 @@ def work_pending(store, model, wake, stop, turn_lock, clock):
                 {field: method[field] for field in ("id", "title", "scope")}
                 for method in store.list_methods(limit=METHOD_INDEX_LIMIT)
             ]
-            response = run_assignment(
-                model,
-                run["request"],
-                store.read_uploads(task_id),
-                lambda name, content: store.stage(task_id, name, content, turn_id=turn_id),
-                lambda message: store.progress(task_id, message, turn_id=turn_id),
-                lambda step: store.record_step(task_id, step, turn_id=turn_id),
-                prior_messages=run["prior_messages"],
-                saved_artifacts=run["artifacts"],
-                read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
-                tool_scope=tool_scope,
-                method_index=method_index,
-                read_method=store.get_method,
-                stage_method=lambda title, scope, procedure, evidence: store.stage_method(
-                    task_id, title, scope, procedure, evidence, turn_id=turn_id,
-                ),
-            )
-            store.complete(task_id, response, turn_id=turn_id)
+            try:
+                response = run_assignment(
+                    model,
+                    run["request"],
+                    store.read_uploads(task_id),
+                    lambda name, content: store.stage(task_id, name, content, turn_id=turn_id),
+                    lambda message: store.progress(task_id, message, turn_id=turn_id),
+                    lambda step: store.record_step(task_id, step, turn_id=turn_id),
+                    prior_messages=run["prior_messages"],
+                    attached_files=run["attached_files"] if run["kind"] != "initial" else None,
+                    saved_artifacts=run["artifacts"],
+                    read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
+                    tool_scope=tool_scope,
+                    method_index=method_index,
+                    read_method=store.get_method,
+                    stage_method=lambda title, scope, procedure, evidence: store.stage_method(
+                        task_id, title, scope, procedure, evidence, turn_id=turn_id,
+                    ),
+                )
+            except NeedsUserInput as pause:
+                store.wait_for_input(task_id, pause.question, turn_id=turn_id)
+            else:
+                store.complete(task_id, response, turn_id=turn_id)
         except InactiveTurn:
             continue
         except (AssignmentError, RevisionConflict) as exc:
@@ -110,6 +118,41 @@ def assignment_request(value, *, max_chars=MAX_REQUEST_CHARS) -> str:
     if not isinstance(value, str) or not 0 < len(value.strip()) <= max_chars:
         raise ValueError(f"Enter a request of up to {max_chars:,} characters.")
     return value.strip()
+
+
+async def read_form_uploads(form: FormData) -> dict[str, bytes]:
+    uploads = {}
+    for file in form.getlist("files"):
+        if not isinstance(file, UploadFile):
+            raise ValueError("Choose files to upload.")
+        name = file.filename
+        if not name:
+            continue
+        if not is_upload_name(name):
+            raise ValueError("Use a plain filename of up to 120 characters.")
+        if name in uploads:
+            raise ValueError("Each upload must have a different filename.")
+        data = await file.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError("Each upload must be 128 KiB or smaller.")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.") from None
+        if b"\x00" in data:
+            raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.")
+        uploads[name] = data
+    return uploads
+
+
+def form_turn_id(form: FormData) -> int:
+    expected = form.get("turn_id", "")
+    if not isinstance(expected, str) or not expected.isdecimal() or not 0 < len(expected) <= 19:
+        raise ValueError("Open the current turn before changing it.")
+    expected_turn_id = int(expected)
+    if not 1 <= expected_turn_id <= MAX_RECORD_NUMBER:
+        raise ValueError("Open the current turn before changing it.")
+    return expected_turn_id
 
 
 def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> FastAPI:
@@ -240,27 +283,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             ) as form:
                 draft = form.get("request", "")
                 prompt = assignment_request(draft)
-                uploads = {}
-                for file in form.getlist("files"):
-                    if not isinstance(file, UploadFile):
-                        raise ValueError("Choose files to upload.")
-                    name = file.filename
-                    if not name:
-                        continue
-                    if not is_upload_name(name):
-                        raise ValueError("Use a plain filename of up to 120 characters.")
-                    if name in uploads:
-                        raise ValueError("Each upload must have a different filename.")
-                    data = await file.read(MAX_FILE_BYTES + 1)
-                    if len(data) > MAX_FILE_BYTES:
-                        raise ValueError("Each upload must be 128 KiB or smaller.")
-                    try:
-                        data.decode("utf-8")
-                    except UnicodeDecodeError:
-                        raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.") from None
-                    if b"\x00" in data:
-                        raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.")
-                    uploads[name] = data
+                uploads = await read_form_uploads(form)
         except HTTPException as exc:
             return render_index(request, error=exc.detail, status_code=400)
         except ValueError as exc:
@@ -271,18 +294,19 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
 
     def render_assignment(
-        request, task_id, *, draft="", error=None, correction_draft="", control_error=None, status_code=200,
+        request, task_id, *, draft="", error=None, reply_to=None, correction_draft="", control_error=None, status_code=200,
     ):
         task = store.get_task(task_id)
         if task is None:
             raise HTTPException(404, "Assignment not found.")
+        waiting_turn_id = task["turns"][-1]["id"] if task["status"] == "waiting" else None
         return templates.TemplateResponse(
             request=request,
             name="task.html",
             context={
                 "task": task,
                 "follow_up_enabled": model is not None,
-                "draft": draft,
+                "draft": draft if reply_to == waiting_turn_id else "",
                 "form_error": error,
                 "correction_draft": correction_draft,
                 "control_error": control_error,
@@ -294,29 +318,52 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     def assignment(request: Request, task_id: str):
         return render_assignment(request, task_id)
 
-    @app.post("/tasks/{task_id}/follow-up")
-    async def follow_up(request: Request, task_id: str):
+    async def queue_reply(request, task_id, *, answering):
         check_form_origin(request)
-        check_form_size(request, MAX_REQUEST_CHARS * 12 + 1024)
+        check_form_size(request, MAX_FORM_BYTES)
         if model is None:
             return render_assignment(request, task_id, error="Configure a model to continue an assignment.", status_code=503)
 
         draft = ""
+        expected = None
         try:
-            async with request.form(max_files=0, max_fields=1, max_part_size=MAX_REQUEST_CHARS * 4) as form:
-                draft = form.get("request", "")
-                prompt = assignment_request(draft)
+            async with request.form(
+                max_files=MAX_FILES, max_fields=2 if answering else 1, max_part_size=MAX_REQUEST_CHARS * 4,
+            ) as form:
+                if answering:
+                    expected = form_turn_id(form)
+                value = form.get("request", "")
+                if isinstance(value, str):
+                    draft = value
+                uploads = await read_form_uploads(form)
+                if answering and isinstance(value, str) and not value.strip():
+                    if not uploads:
+                        raise ValueError("Enter an answer or attach the requested file.")
+                    prompt = "I attached the requested source files."
+                else:
+                    prompt = assignment_request(value)
         except (HTTPException, ValueError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
-            return render_assignment(request, task_id, draft=draft, error=error, status_code=400)
+            return render_assignment(request, task_id, draft=draft, reply_to=expected, error=error, status_code=400)
         try:
-            await asyncio.to_thread(store.follow_up, task_id, prompt)
+            if answering:
+                await asyncio.to_thread(store.answer, task_id, expected, prompt, uploads)
+            else:
+                await asyncio.to_thread(store.follow_up, task_id, prompt, uploads)
         except KeyError:
             raise HTTPException(404, "Assignment not found.") from None
-        except ValueError as exc:
-            return render_assignment(request, task_id, draft=draft, error=str(exc), status_code=409)
+        except (ValueError, InactiveTurn) as exc:
+            return render_assignment(request, task_id, draft=draft, reply_to=expected, error=str(exc), status_code=409)
         wake.set()
         return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
+
+    @app.post("/tasks/{task_id}/follow-up")
+    async def follow_up(request: Request, task_id: str):
+        return await queue_reply(request, task_id, answering=False)
+
+    @app.post("/tasks/{task_id}/answer")
+    async def answer(request: Request, task_id: str):
+        return await queue_reply(request, task_id, answering=True)
 
     def apply_turn_control(action, *args):
         with turn_lock:
@@ -335,12 +382,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             async with request.form(
                 max_files=0, max_fields=2 if correction else 1, max_part_size=MAX_REQUEST_CHARS * 4,
             ) as form:
-                expected = form.get("turn_id", "")
-                if not isinstance(expected, str) or not expected.isdecimal() or not 0 < len(expected) <= 19:
-                    raise ValueError("Open the current turn before changing it.")
-                expected_turn_id = int(expected)
-                if not 1 <= expected_turn_id <= MAX_RECORD_NUMBER:
-                    raise ValueError("Open the current turn before changing it.")
+                expected_turn_id = form_turn_id(form)
                 args = (task_id, expected_turn_id)
                 if correction:
                     value = form.get("request", "")

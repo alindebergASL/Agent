@@ -16,22 +16,23 @@
 {% endblock %}
 {% block body %}
 {% set displayed_turn = task.turns | last %}
+{% set waiting = task.status == "waiting" %}
 <a class="back" href="{{ url_for('index') }}">← Assignments</a>
 <section class="panel">
   <div class="heading">
     <h1>Assignment</h1>
-    <span class="status" data-state="{{ task.status }}" data-task-status="{{ task.status }}">{{ task.status | capitalize }}</span>
+    <span class="status" data-state="{{ task.status }}" data-task-status="{{ task.status }}">{{ "Waiting for your input" if waiting else task.status | capitalize }}</span>
   </div>
   {% for turn in task.turns %}
   <div class="turn" data-turn-id="{{ turn.id }}" data-turn-status="{{ turn.status }}" data-turn-kind="{{ turn.kind }}">
     <div class="heading">
-      <h2>{{ {"initial": "Original request", "follow-up": "Follow-up", "correction": "Correction", "continuation": "Continuation"}.get(turn.kind, "Request") }}</h2>
-      {% if not loop.last %}<span class="status" data-state="{{ turn.status }}">{{ turn.status | capitalize }}</span>{% endif %}
+      <h2>{{ {"initial": "Original request", "follow-up": "Follow-up", "correction": "Correction", "continuation": "Continuation", "answer": "Your answer"}.get(turn.kind, "Request") }}</h2>
+      {% if not loop.last %}<span class="status" data-state="{{ turn.status }}">{{ "Asked for input" if turn.status == "waiting" else turn.status | capitalize }}</span>{% endif %}
     </div>
     <p class="prose">{{ turn.request }}</p>
     {% if turn.error %}<p class="notice"{% if loop.last %} role="alert"{% endif %}>{{ turn.error }}</p>{% endif %}
     {% if turn.response %}
-    <h3>Result</h3>
+    <h3>{{ "Question" if turn.status in ("waiting", "stopped") else "Result" }}</h3>
     <p class="prose">{{ turn.response }}</p>
     {% endif %}
   </div>
@@ -56,11 +57,11 @@
   <p><a href="{{ url_for('method_from_task', task_id=task.id) }}">Save reusable method</a></p>
   {% endif %}
 </section>
-{% if task.status in ("queued", "running", "interrupted") or control_error %}
+{% if task.status in ("queued", "running", "interrupted", "waiting") or control_error %}
 <section id="turn-controls" class="panel">
   <h2>Turn controls</h2>
   {% if control_error %}<p class="notice" role="alert">{{ control_error }}</p>{% endif %}
-  {% if task.status in ("queued", "running") %}
+  {% if task.status in ("queued", "running", "waiting") %}
   <form action="{{ url_for('stop_turn', task_id=task.id) }}" method="post">
     <input type="hidden" name="turn_id" value="{{ displayed_turn.id }}">
     <button type="submit">Stop</button>
@@ -82,15 +83,18 @@
   {% endif %}
 </section>
 {% endif %}
-{% if task.can_follow_up or draft or form_error %}
+{% if form_error %}<p class="notice" role="alert">{{ form_error }}</p>{% endif %}
+{% if waiting or task.can_follow_up %}
 <section class="panel">
-  <h2>Continue assignment</h2>
-  {% if form_error %}<p class="notice" role="alert">{{ form_error }}</p>{% endif %}
+  <h2>{{ "Answer the question" if waiting else "Continue assignment" }}</h2>
   {% if not follow_up_enabled %}<p class="notice">Configure a model to continue this assignment.</p>{% endif %}
-  <form action="{{ url_for('follow_up', task_id=task.id) }}" method="post" enctype="multipart/form-data">
-    <label for="follow-up">Follow-up request</label>
-    <textarea id="follow-up" name="request" rows="5" maxlength="8000" required>{{ draft }}</textarea>
-    <button type="submit"{% if not follow_up_enabled or not task.can_follow_up %} disabled{% endif %}>Send follow-up</button>
+  <form action="{{ url_for('answer' if waiting else 'follow_up', task_id=task.id) }}" method="post" enctype="multipart/form-data">
+    {% if waiting %}<input type="hidden" name="turn_id" value="{{ displayed_turn.id }}">{% endif %}
+    <label for="follow-up">{{ "Your answer" if waiting else "Follow-up request" }}</label>
+    <textarea id="follow-up" name="request" rows="5" maxlength="8000"{% if not waiting %} required{% endif %}>{{ draft }}</textarea>
+    <label for="files">Additional supporting files</label>
+    <input id="files" name="files" type="file" multiple>
+    <button type="submit"{% if not follow_up_enabled %} disabled{% endif %}>{{ "Send answer" if waiting else "Send follow-up" }}</button>
   </form>
 </section>
 {% endif %}

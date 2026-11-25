@@ -39,9 +39,15 @@ Open **Run history (JSON)** from a task's Activity section to inspect its saved 
 
 ### Continue a completed assignment
 
-Open the saved recommendation, choose **Edit Markdown**, and save your changes. Return to the assignment and submit a follow-up. The app reuses the original uploads and conversation. The existing file links open the latest saved revision, and the revision list lets you reopen earlier versions. Markdown source links open the numbered rows of the original uploads.
+Open the saved recommendation, choose **Edit Markdown**, and save your changes. Return to the assignment and submit a follow-up. The app reuses the original uploads and conversation. You can attach new sources with a follow-up. Each source needs a distinct filename so earlier citations keep pointing to the original bytes. The existing file links open the latest saved revision, and the revision list lets you reopen earlier versions. Markdown source links open the numbered rows of the original uploads.
 
 The agent reads the saved revisions that were current when its turn started. If you edit one of the files it is replacing before it finishes, the app keeps your edit and leaves that turn’s draft outputs unpublished. Submit a follow-up to retry against the saved revisions.
+
+### Answer a question from the agent
+
+When the agent needs a missing fact, source, or decision to finish, the assignment can show **Waiting for your input**. The worker is free to run other assignments. Reopen the same assignment after a restart and answer with text, supporting files, or both. The agent receives the original request, its question, your reply, and the available sources. The run history keeps the earlier tool calls. Only completed turns publish their draft files and methods.
+
+For example, upload a unit price and ask for a firm delivered total when only you know the freight charge. When asked, attach the freight terms. The finished calculation and both sources are available in the same assignment.
 
 ### Change course during a turn
 
