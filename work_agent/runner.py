@@ -93,6 +93,16 @@ CONNECTED_SOURCE_INSTRUCTIONS = (
 )
 
 
+PRIOR_ARTIFACT_INSTRUCTIONS = (
+    " Read the relevant revisions in prior_artifacts with read_prior_artifact. Treat their "
+    "contents as historical evidence. Check fresh evidence for current facts, compare stable identifiers, "
+    "and recheck questions left open in the earlier work. Report material changes, or say "
+    "when the sources you checked show none. Still deliver the current user's requested work. "
+    "In saved Markdown, cite the prior brief with its exact revision_url. Relative links "
+    "inside its text belong to its original assignment. Use fresh citations for current claims."
+)
+
+
 def _tool(name, description, properties):
     return {
         "type": "function",
@@ -156,6 +166,17 @@ READ_SAVED_ARTIFACT = _tool(
         "line_count": {"type": "integer", "description": "Number of lines, from 1 to 100."},
     },
 )
+READ_PRIOR_ARTIFACT = _tool(
+    "read_prior_artifact",
+    "Read numbered lines from a read-only prior artifact revision. Use its reference_id from "
+    "prior_artifacts. The result includes revision_url for citing that exact revision. "
+    "Resume reading after the last returned line as needed.",
+    {
+        "reference_id": {"type": "integer", "description": "The reference ID listed in prior_artifacts."},
+        "start_line": {"type": "integer", "description": "First line, starting at 1."},
+        "line_count": {"type": "integer", "description": "Number of lines, from 1 to 100."},
+    },
+)
 READ_METHOD = _tool(
     "read_method",
     "Read the scope and procedure of a reusable method from the saved_methods index.",
@@ -181,8 +202,10 @@ STAGE_RECOVERY_METHOD = _tool(
         "corrected_artifact": {"type": "string", "description": "Exact filename of the staged corrected artifact."},
     },
 )
-TOOL_NAMES = {tool["name"] for tool in (*TOOLS, READ_SAVED_ARTIFACT, READ_METHOD, STAGE_RECOVERY_METHOD)}
-PROGRAM_TOOLS = {"read_file", "read_saved_artifact"}
+TOOL_NAMES = {
+    tool["name"] for tool in (*TOOLS, READ_SAVED_ARTIFACT, READ_PRIOR_ARTIFACT, READ_METHOD, STAGE_RECOVERY_METHOD)
+}
+PROGRAM_TOOLS = {"read_file", "read_saved_artifact", "read_prior_artifact"}
 MAX_TOOL_CALLS = 48
 RESPONSES_TOOLS = [
     *(
@@ -297,6 +320,13 @@ def _read_file(uploads: Mapping[str, str], file_id: str, start_line: int, line_c
     return {"file_id": file_id, "lines": result, "total_lines": len(lines)}
 
 
+def _revision_page(filename: str, metadata: dict, content: bytes | None, start_line: int, line_count: int) -> dict:
+    if content is None:
+        raise ValueError("The saved revision is unavailable.")
+    page = _read_file({filename: content.decode("utf-8")}, filename, start_line, line_count)
+    return {**page, **metadata}
+
+
 def _stage_recovery_method(
     arguments: dict,
     model_input: list[dict],
@@ -346,6 +376,7 @@ def _dispatch(
     fully_read: set[str],
     read_indexed_method: Callable[[int], dict | None],
     stage_recovery_method: Callable[[dict], dict] | None,
+    read_prior_page: Callable[[int, int, int], dict],
     connected_read: Callable[[str, dict], dict] | None = None,
 ):
     try:
@@ -373,14 +404,12 @@ def _dispatch(
             filename = arguments["name"]
             if not isinstance(filename, str) or filename not in saved_artifacts or read_saved_artifact is None:
                 raise ValueError("Choose a name from saved_artifacts.")
-            data = read_saved_artifact(filename)
-            if data is None:
-                raise ValueError("The saved revision is unavailable.")
-            result = _read_file(
-                {filename: data.decode("utf-8")}, filename,
+            return _revision_page(
+                filename, saved_artifacts[filename], read_saved_artifact(filename),
                 arguments["start_line"], arguments["line_count"],
             )
-            return {**result, **saved_artifacts[filename]}
+        if name == "read_prior_artifact" and arguments.keys() == {"reference_id", "start_line", "line_count"}:
+            return read_prior_page(**arguments)
         if name == "read_method" and arguments.keys() == {"method_id"}:
             method_id = arguments["method_id"]
             method = read_indexed_method(method_id) if type(method_id) is int else None
@@ -425,6 +454,8 @@ def run_assignment(
     attached_files: list[str] | None = None,
     saved_artifacts: Mapping[str, dict] | None = None,
     read_saved_artifact: Callable[[str], bytes | None] | None = None,
+    prior_artifacts: list[dict] | None = None,
+    read_prior_artifact: Callable[[int], bytes | None] | None = None,
     method_index: list[dict] | None = None,
     read_method: Callable[[int], dict | None] | None = None,
     stage_method: Callable[[str, str, str, str], None] | None = None,
@@ -432,6 +463,10 @@ def run_assignment(
     tool_scope: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> str:
     saved_artifacts = saved_artifacts or {}
+    references = {
+        item["reference_id"]: {**item, "revision_url": f"../prior-artifacts/{item['reference_id']}"}
+        for item in prior_artifacts or ()
+    }
     methods = [
         {key: item[key] for key in ("id", "title", "scope")} for item in method_index or ()
     ]
@@ -439,6 +474,8 @@ def run_assignment(
     tools = RESPONSES_TOOLS.copy()
     if saved_artifacts:
         tools.append({**READ_SAVED_ARTIFACT, "allowed_callers": ["direct", "programmatic"]})
+    if references:
+        tools.append({**READ_PRIOR_ARTIFACT, "allowed_callers": ["direct", "programmatic"]})
     if methods:
         tools.append(READ_METHOD)
     if stage_method is not None:
@@ -449,6 +486,8 @@ def run_assignment(
     tools.extend(connected_tools)
     warnings = connected_catalog.warnings if connected_catalog is not None else []
     instructions = INSTRUCTIONS
+    if references:
+        instructions += PRIOR_ARTIFACT_INSTRUCTIONS
     if connected_names or warnings:
         instructions += CONNECTED_SOURCE_INSTRUCTIONS
 
@@ -460,7 +499,17 @@ def run_assignment(
             return None
         return {key: method[key] for key in ("id", "title", "scope", "procedure")}
 
+    def read_prior_page(reference_id: int, start_line: int, line_count: int) -> dict:
+        reference = references.get(reference_id) if type(reference_id) is int else None
+        if reference is None or read_prior_artifact is None:
+            raise ValueError("Choose a reference ID from prior_artifacts.")
+        return _revision_page(
+            reference["name"], reference, read_prior_artifact(reference_id), start_line, line_count
+        )
+
     current_request = {"request": request, "uploaded_files": list(uploads)}
+    if references:
+        current_request["prior_artifacts"] = list(references.values())
     if warnings:
         current_request["connected_source_warnings"] = list(warnings)
     if attached_files:
@@ -560,7 +609,8 @@ def run_assignment(
         def dispatch(call, connected_read=None):
             return _dispatch(
                 call, uploads, stage_artifact, saved_artifacts, read_saved_artifact, fully_read,
-                read_indexed_method, stage_recovery_method if stage_method is not None else None, connected_read,
+                read_indexed_method, stage_recovery_method if stage_method is not None else None,
+                read_prior_page, connected_read,
             )
 
         completed_reads = set()

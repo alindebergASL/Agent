@@ -37,6 +37,14 @@
     {% endif %}
   </div>
   {% endfor %}
+  {% if task.prior_artifacts %}
+  <h2>Previous brief</h2>
+  <ul>
+    {% for prior in task.prior_artifacts %}
+    <li><a href="{{ url_for('prior_artifact', task_id=task.id, reference_id=prior.reference_id) }}">{{ prior.name }} · Revision {{ prior.revision }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   {% if task.uploads %}
   <h2>Uploaded files</h2>
   <ul>
