@@ -769,6 +769,20 @@ class Store:
                 (task_id, json.dumps(step), active),
             )
 
+    def source_evidence(self, task_id: str, source_ref: str) -> dict | None:
+        if not re.fullmatch(r"[a-f0-9]{32}", source_ref):
+            return None
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT json_extract(payload, '$.output') FROM run_steps
+                WHERE task_id = ? AND json_extract(payload, '$.source_ref') = ?
+                    AND json_extract(payload, '$.type') = 'function_call_output'
+                """,
+                (task_id, source_ref),
+            ).fetchone()
+        return json.loads(row[0]) if row is not None else None
+
     def run_history(self, task_id: str) -> dict | None:
         with self._connection() as connection:
             connection.execute("BEGIN")

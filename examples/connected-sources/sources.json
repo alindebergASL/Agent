@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "name": "purchasing",
+      "url": "http://purchasing:8000/mcp",
+      "tools": ["list_orders"]
+    },
+    {
+      "name": "warehouse",
+      "url": "http://warehouse:8000/mcp",
+      "tools": ["list_receipts"]
+    }
+  ]
+}

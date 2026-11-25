@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Source evidence · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('assignment', task_id=task_id) }}">← Assignment</a>
+<section class="panel">
+  <h1>Source evidence</h1>
+  <p>{{ receipt.source }} · {{ receipt.tool }}</p>
+  <pre>{{ receipt.data | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

@@ -24,6 +24,8 @@ def is_upload_name(name: str) -> bool:
 class ArtifactMarkdown(MarkdownIt):
     def validateLink(self, url: str) -> bool:
         # Allow same-assignment source rows without opening arbitrary relative URLs.
+        if re.fullmatch(r"\.\./evidence/[a-f0-9]{32}", url):
+            return True
         citation = UPLOAD_CITATION.fullmatch(url)
         if citation:
             try:
