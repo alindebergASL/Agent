@@ -1,7 +1,7 @@
 """Single-process web application and background assignment runner."""
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
 import logging
 import os
@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .artifact_preview import is_upload_name, markdown_preview
+from .connected_sources import ConnectedSources
 from .runner import AssignmentError, NeedsUserInput, OpenAIModel, run_assignment
 from .scheduling import PACIFIC, WEEKDAYS, format_pacific, parse_schedule_time, utc_now
 from .storage import (
@@ -38,7 +39,7 @@ ScheduleId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 logger = logging.getLogger(__name__)
 
 
-def work_pending(store, model, wake, stop, turn_lock, clock):
+def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
     while not stop.is_set():
         wake.clear()
         try:
@@ -71,24 +72,26 @@ def work_pending(store, model, wake, stop, turn_lock, clock):
                 for method in store.list_methods(limit=METHOD_INDEX_LIMIT)
             ]
             try:
-                response = run_assignment(
-                    model,
-                    run["request"],
-                    store.read_uploads(task_id),
-                    lambda name, content: store.stage(task_id, name, content, turn_id=turn_id),
-                    lambda message: store.progress(task_id, message, turn_id=turn_id),
-                    lambda step: store.record_step(task_id, step, turn_id=turn_id),
-                    prior_messages=run["prior_messages"],
-                    attached_files=run["attached_files"] if run["kind"] != "initial" else None,
-                    saved_artifacts=run["artifacts"],
-                    read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
-                    tool_scope=tool_scope,
-                    method_index=method_index,
-                    read_method=store.get_method,
-                    stage_method=lambda title, scope, procedure, evidence: store.stage_method(
-                        task_id, title, scope, procedure, evidence, turn_id=turn_id,
-                    ),
-                )
+                with (sources.open() if sources else nullcontext()) as catalog:
+                    response = run_assignment(
+                        model,
+                        run["request"],
+                        store.read_uploads(task_id),
+                        lambda name, content: store.stage(task_id, name, content, turn_id=turn_id),
+                        lambda message: store.progress(task_id, message, turn_id=turn_id),
+                        lambda step: store.record_step(task_id, step, turn_id=turn_id),
+                        prior_messages=run["prior_messages"],
+                        attached_files=run["attached_files"] if run["kind"] != "initial" else None,
+                        saved_artifacts=run["artifacts"],
+                        read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
+                        tool_scope=tool_scope,
+                        connected_catalog=catalog,
+                        method_index=method_index,
+                        read_method=store.get_method,
+                        stage_method=lambda title, scope, procedure, evidence: store.stage_method(
+                            task_id, title, scope, procedure, evidence, turn_id=turn_id,
+                        ),
+                    )
             except NeedsUserInput as pause:
                 store.wait_for_input(task_id, pause.question, turn_id=turn_id)
             else:
@@ -176,7 +179,9 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             return
 
         stop.clear()
-        worker = Thread(target=work_pending, args=(store, model, wake, stop, turn_lock, clock), daemon=True)
+        config_path = os.environ.get("WORK_AGENT_MCP_CONFIG")
+        sources = ConnectedSources.from_file(Path(config_path)) if config_path else None
+        worker = Thread(target=work_pending, args=(store, model, wake, stop, turn_lock, clock, sources), daemon=True)
         worker.start()
         try:
             yield
@@ -566,6 +571,15 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         except KeyError:
             raise HTTPException(404, "Saved method not found.") from None
         return RedirectResponse(request.url_for("methods"), status_code=303)
+
+    @app.get("/tasks/{task_id}/evidence/{source_ref}")
+    def source_evidence(request: Request, task_id: str, source_ref: str):
+        receipt = store.source_evidence(task_id, source_ref)
+        if receipt is None:
+            raise HTTPException(404, "Source evidence not found.")
+        return templates.TemplateResponse(
+            request=request, name="source_evidence.html", context={"receipt": receipt, "task_id": task_id},
+        )
 
     @app.get("/tasks/{task_id}/uploads/{name}")
     def uploaded_source(request: Request, task_id: str, name: str, download: bool = False):

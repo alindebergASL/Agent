@@ -1,0 +1,39 @@
+x-source: &source
+  image: ${COMPOSE_PROJECT_NAME}-app
+  pull_policy: never
+  networks: [sources]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"]
+    interval: 2s
+    timeout: 3s
+    retries: 20
+
+services:
+  app:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    environment:
+      WORK_AGENT_MCP_CONFIG: /run/work-agent/sources.json
+    volumes:
+      - ./examples/connected-sources/sources.json:/run/work-agent/sources.json:ro
+    networks: [default, sources]
+    depends_on:
+      purchasing:
+        condition: service_healthy
+      warehouse:
+        condition: service_healthy
+
+  purchasing:
+    <<: *source
+    command: ["python", "-m", "tests.connected_source_fixture", "--role", "purchasing", "--file", "/fixtures/purchase-orders.csv", "--host", "0.0.0.0"]
+    volumes:
+      - ./examples/receiving/purchase-orders.csv:/fixtures/purchase-orders.csv:ro
+
+  warehouse:
+    <<: *source
+    command: ["python", "-m", "tests.connected_source_fixture", "--role", "warehouse", "--file", "/fixtures/receipts.csv", "--host", "0.0.0.0"]
+    volumes:
+      - ${WORK_AGENT_DEMO_RECEIPTS:-./examples/receiving/receipts.csv}:/fixtures/receipts.csv:ro
+
+networks:
+  sources:
+    internal: true

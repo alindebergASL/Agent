@@ -17,6 +17,39 @@ docker compose up --build -d
 
 Open `http://127.0.0.1:8000`. The app uses `gpt-6.2-sol` by default. To use Terra, run `OPENAI_MODEL=gpt-6.1-terra docker compose up --build -d`. Set `WORK_AGENT_PORT` to change the local port. `OPENAI_BASE_URL` is optional and can point the app to a local Responses test double.
 
+## Read from connected systems
+
+Work Agent can discover selected read tools from HTTP MCP servers and call them directly or from OpenAI-hosted JavaScript. A program can combine those records with uploaded files and saved revisions in the same assignment. Each successful connected read records the returned data on the assignment. A citation in a saved Markdown report can reopen that snapshot after the upstream data changes.
+
+For a runnable example, connect two local sources and ask which purchase orders are short. The example includes the Compose configuration, source setup, and independent verification steps. [Purchasing and warehouse example](examples/connected-sources/README.md)
+
+To connect your own system, mount a JSON file read-only into the app container and set `WORK_AGENT_MCP_CONFIG` to its container path. List the exact tool names the program may call. Each tool must advertise `readOnlyHint: true` and omit or disable `destructiveHint`. Use a credential with read access to the intended data. Supply its value to the app through the environment variable named by `token_env`. Bearer authentication requires HTTPS.
+
+```json
+{
+  "sources": [{
+    "name": "warehouse",
+    "url": "https://warehouse.example.com/mcp",
+    "tools": ["list_receipts"],
+    "token_env": "WAREHOUSE_READ_TOKEN"
+  }]
+}
+```
+
+For example, save that config as `sources.json` beside `compose.yaml` and add a local Compose override. Set `WAREHOUSE_READ_TOKEN` in the shell that starts the app.
+
+```yaml
+services:
+  app:
+    environment:
+      WORK_AGENT_MCP_CONFIG: /run/work-agent/sources.json
+      WAREHOUSE_READ_TOKEN:
+    volumes:
+      - ./sources.json:/run/work-agent/sources.json:ro
+```
+
+Selected tool descriptions and the returned records are sent to the configured model provider as part of the assignment. The app stores the results in its existing volume. A linked snapshot represents one read. Consistency across multiple pages depends on the upstream system’s paging contract.
+
 ## Run offline tests
 
 ```bash
@@ -39,7 +72,7 @@ docker compose up -d --force-recreate app
 
 Compose mounts the `agent-data` volume at `/data` for the assignment database, inputs, and outputs. Keep the volume when recreating the container or updating the app.
 
-Open **Run history (JSON)** from a task's Activity section to inspect its saved Responses items and tool receipts. Hosted calls share a program ID, and Activity shows the file and line range each program read. The history can include uploaded text returned by a tool, so review it before sharing.
+Open **Run history (JSON)** from a task's Activity section to inspect its saved Responses items and tool receipts. Hosted calls share a program ID, and Activity shows the file and line range each program read. The history can include uploaded text and records from connected systems, so review it before sharing.
 
 ### Continue a completed assignment
 

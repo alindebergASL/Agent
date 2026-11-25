@@ -57,6 +57,8 @@ Programmatic tool calling, or PTC, lets the model write code that coordinates se
 
 For example, the agent could retrieve several independent sources, extract comparable fields, and return a compact table to reason over. It can then make a direct call to inspect a confusing source before writing its recommendation.
 
+The implementation supports programmatic reads from uploaded files, saved artifact revisions, and explicitly configured read tools on MCP servers. The app discovers the connected tools’ input schemas and keeps a copy of each successful tool result with the assignment. Saved Markdown can cite that copy and identify the records used. See the [two-source reconciliation example](../examples/connected-sources/README.md).
+
 Hosted PTC is a provider choice. If immediate support for other model providers is essential, a local program executor may be preferable, with additional runtime work. Keep that as an explicit tradeoff; an owned loop does not automatically provide identical behavior across providers.
 
 # Durable work and context
