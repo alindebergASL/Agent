@@ -1,6 +1,5 @@
 import json
 import re
-import shutil
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
@@ -12,11 +11,12 @@ from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time,
 
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(csv|md)")
 MAX_ARTIFACT_BYTES = 1024 * 1024
+MAX_FILES = 8
 MAX_SCHEDULE_REQUEST_CHARS = 8_000
 METHOD_FIELD_LIMITS = {"title": 120, "scope": 500, "procedure": 4000, "evidence": 1000}
 INTERRUPTED = "The worker restarted before this assignment finished."
-SCHEMA_VERSION = 1
-STATUSES = "'queued','running','completed','failed','interrupted','stopped','superseded'"
+SCHEMA_VERSION = 2
+STATUSES = "'queued','running','completed','failed','interrupted','stopped','superseded','waiting'"
 
 TASKS_TABLE = f"""
 CREATE TABLE IF NOT EXISTS {{table}} (
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS {{table}} (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     request TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ({STATUSES})),
-    kind TEXT NOT NULL CHECK (kind IN ('initial','follow-up','correction','continuation')),
+    kind TEXT NOT NULL CHECK (kind IN ('initial','follow-up','correction','continuation','answer')),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     response TEXT,
     error TEXT
@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS uploads (
     task_id TEXT NOT NULL REFERENCES tasks(id),
     position INTEGER NOT NULL,
     name TEXT NOT NULL,
+    content BLOB,
+    turn_id INTEGER REFERENCES turns(id),
     PRIMARY KEY (task_id, position),
     UNIQUE (task_id, name)
 );
@@ -156,6 +158,12 @@ class Store:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
+            if version < SCHEMA_VERSION:
+                columns = {column["name"] for column in connection.execute("PRAGMA table_info(uploads)")}
+                if "content" not in columns:
+                    connection.execute("ALTER TABLE uploads ADD COLUMN content BLOB")
+                if "turn_id" not in columns:
+                    connection.execute("ALTER TABLE uploads ADD COLUMN turn_id INTEGER REFERENCES turns(id)")
             columns = connection.execute("PRAGMA table_info(saved_methods)")
             if "revision" not in {column["name"] for column in columns}:
                 connection.execute("ALTER TABLE saved_methods ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
@@ -197,14 +205,17 @@ class Store:
             connection.execute("DROP TABLE tasks")
             connection.execute("ALTER TABLE tasks_upgrade RENAME TO tasks")
         if "turns" in existing:
+            columns = connection.execute("PRAGMA table_info(turns)")
+            kind = "kind" if "kind" in {column["name"] for column in columns} else """
+                CASE WHEN id = (
+                    SELECT MIN(first.id) FROM turns AS first WHERE first.task_id = turns.task_id
+                ) THEN 'initial' ELSE 'follow-up' END
+            """
             connection.execute(TURNS_TABLE.format(table="turns_upgrade"))
             connection.execute(
-                """
+                f"""
                 INSERT INTO turns_upgrade (id, task_id, request, status, created_at, response, error, kind)
-                SELECT id, task_id, request, status, created_at, response, error,
-                    CASE WHEN id = (
-                        SELECT MIN(first.id) FROM turns AS first WHERE first.task_id = turns.task_id
-                    ) THEN 'initial' ELSE 'follow-up' END
+                SELECT id, task_id, request, status, created_at, response, error, {kind}
                 FROM turns
                 """
             )
@@ -243,34 +254,20 @@ class Store:
 
     def submit(self, request: str, uploads: dict[str, bytes]) -> str:
         task_id = uuid.uuid4().hex
-        workspace = self._workspace(task_id)
-        workspace.mkdir()
-        try:
-            inputs = workspace / "inputs"
-            inputs.mkdir()
-            entries = []
-            for position, (name, content) in enumerate(uploads.items()):
-                (inputs / str(position)).write_bytes(content)
-                entries.append((task_id, position, name))
-            with self._connection() as connection:
-                self._insert_task(connection, task_id, request)
-                connection.executemany(
-                    "INSERT INTO uploads (task_id, position, name) VALUES (?, ?, ?)", entries
-                )
-        except Exception:
-            shutil.rmtree(workspace)
-            raise
+        with self._connection() as connection:
+            turn_id = self._insert_task(connection, task_id, request)
+            self._add_uploads(connection, task_id, turn_id, uploads)
         return task_id
 
-    def _insert_task(self, connection: sqlite3.Connection, task_id: str, request: str) -> None:
+    def _insert_task(self, connection: sqlite3.Connection, task_id: str, request: str) -> int:
         connection.execute(
             "INSERT INTO tasks (id, request, status) VALUES (?, ?, 'queued')",
             (task_id, request),
         )
-        connection.execute(
-            "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', 'initial')",
+        return connection.execute(
+            "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', 'initial') RETURNING id",
             (task_id, request),
-        )
+        ).fetchone()["id"]
 
     def create_schedule(self, request: str, weekday: int, local_time: str, *, now: datetime) -> int:
         request = request.strip() if isinstance(request, str) else ""
@@ -413,7 +410,7 @@ class Store:
             return task
 
     def _turns(self, connection: sqlite3.Connection, task_id: str) -> list[dict]:
-        return [
+        turns = [
             dict(row)
             for row in connection.execute(
                 """
@@ -423,6 +420,13 @@ class Store:
                 (task_id,),
             )
         ]
+        if turns:
+            by_id = {turn["id"]: turn for turn in turns}
+            for source in self._uploads(connection, task_id):
+                # All uploads on pre-clarification volumes arrived with the initial turn.
+                owner = turns[0] if source["turn_id"] is None else by_id[source["turn_id"]]
+                owner.setdefault("attached_files", []).append(source["name"])
+        return turns
 
     def _can_follow_up(self, connection: sqlite3.Connection, task_id: str, status: str) -> bool:
         if status in ("completed", "stopped"):
@@ -431,7 +435,7 @@ class Store:
             "SELECT 1 FROM turns WHERE task_id = ? AND status = 'completed' LIMIT 1", (task_id,)
         ).fetchone() is not None
 
-    def follow_up(self, task_id: str, request: str) -> int:
+    def follow_up(self, task_id: str, request: str, uploads: dict[str, bytes] | None = None) -> int:
         request = request.strip()
         if not request:
             raise ValueError("Enter a follow-up request.")
@@ -442,13 +446,41 @@ class Store:
                 raise KeyError(task_id)
             if not self._can_follow_up(connection, task_id, row["status"]):
                 raise ValueError("This assignment is not ready for a follow-up.")
-            return self._queue_turn(connection, task_id, request, "follow-up")
+            return self._queue_turn(connection, task_id, request, "follow-up", uploads)
 
-    def _queue_turn(self, connection: sqlite3.Connection, task_id: str, request: str, kind: str) -> int:
+    def wait_for_input(self, task_id: str, question: str, *, turn_id: int) -> None:
+        question = question.strip()
+        if not question:
+            raise ValueError("Enter a question for the user.")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = self._running_turn(connection, task_id, turn_id)
+            self._discard_drafts(connection, active)
+            connection.execute("UPDATE turns SET status = 'waiting', response = ? WHERE id = ?", (question, active))
+            connection.execute("UPDATE tasks SET status = 'waiting', response = ? WHERE id = ?", (question, task_id))
+
+    def answer(
+        self, task_id: str, expected_turn_id: int, request: str, uploads: dict[str, bytes] | None = None,
+    ) -> int:
+        request = request.strip()
+        if not request:
+            raise ValueError("Enter an answer.")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            turn = self._expected_turn(connection, task_id, expected_turn_id)
+            if turn["status"] != "waiting":
+                raise ValueError("This assignment is no longer waiting for an answer.")
+            return self._queue_turn(connection, task_id, request, "answer", uploads)
+
+    def _queue_turn(
+        self, connection: sqlite3.Connection, task_id: str, request: str,
+        kind: str, uploads: dict[str, bytes] | None = None,
+    ) -> int:
         turn_id = connection.execute(
             "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', ?) RETURNING id",
             (task_id, request, kind),
         ).fetchone()["id"]
+        self._add_uploads(connection, task_id, turn_id, uploads)
         connection.execute(
             "UPDATE tasks SET status = 'queued', response = NULL, error = NULL WHERE id = ?", (task_id,)
         )
@@ -473,10 +505,10 @@ class Store:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             turn = self._expected_turn(connection, task_id, expected_turn_id)
-            if turn["status"] not in ("queued", "running"):
-                raise ValueError("Only a queued or running turn can be stopped.")
+            if turn["status"] not in ("queued", "running", "waiting"):
+                raise ValueError("Only a queued, running, or waiting turn can be stopped.")
             connection.execute("UPDATE turns SET status = 'stopped' WHERE id = ?", (turn["id"],))
-            connection.execute("UPDATE tasks SET status = 'stopped' WHERE id = ?", (task_id,))
+            connection.execute("UPDATE tasks SET status = 'stopped', response = NULL WHERE id = ?", (task_id,))
             self._discard_drafts(connection, turn["id"])
 
     def correct_turn(self, task_id: str, expected_turn_id: int, request: str) -> int:
@@ -538,7 +570,11 @@ class Store:
             active = turns[-1]
             messages = []
             request_start = 0
+            source_turn = turns[0]
             for previous, following in zip(turns, turns[1:]):
+                # A continuation retries the same request with its original attachments.
+                if previous["kind"] != "continuation":
+                    source_turn = previous
                 if previous["kind"] in ("initial", "follow-up"):
                     request_start = len(messages)
                 if previous["status"] == "stopped":
@@ -548,8 +584,11 @@ class Store:
                     continue
                 if following["kind"] == "continuation":
                     continue
-                messages.append({"role": "user", "content": previous["request"]})
-                if previous["status"] == "completed" and previous["response"]:
+                content = previous["request"]
+                if source_turn["kind"] != "initial" and source_turn.get("attached_files"):
+                    content = json.dumps({"request": content, "attached_files": source_turn["attached_files"]})
+                messages.append({"role": "user", "content": content})
+                if previous["status"] in ("completed", "waiting") and previous["response"]:
                     messages.append({"role": "assistant", "content": previous["response"]})
             artifacts = connection.execute(
                 """
@@ -560,10 +599,13 @@ class Store:
                 """,
                 (task_id, active["id"]),
             )
+            if active["kind"] != "continuation":
+                source_turn = active
             return {
                 "turn_id": active["id"],
                 "request": active["request"],
                 "kind": active["kind"],
+                "attached_files": source_turn.get("attached_files", []),
                 "prior_messages": messages,
                 "artifacts": {
                     row["name"]: {"revision": row["revision"], "author": row["author"]} for row in artifacts
@@ -572,26 +614,46 @@ class Store:
 
     def _uploads(self, connection: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
         return connection.execute(
-            "SELECT name, position FROM uploads WHERE task_id = ? ORDER BY position", (task_id,)
+            "SELECT name, position, turn_id FROM uploads WHERE task_id = ? ORDER BY position", (task_id,)
         ).fetchall()
+
+    def _add_uploads(
+        self, connection: sqlite3.Connection, task_id: str, turn_id: int, uploads: dict[str, bytes] | None,
+    ) -> None:
+        if not uploads:
+            return
+        existing = self._uploads(connection, task_id)
+        if any(row["name"] in uploads for row in existing):
+            raise ValueError("An upload already uses that filename. Choose a new filename.")
+        if len(existing) + len(uploads) > MAX_FILES:
+            raise ValueError(f"An assignment can have up to {MAX_FILES} uploaded files.")
+        start = existing[-1]["position"] + 1 if existing else 0
+        connection.executemany(
+            "INSERT INTO uploads (task_id, position, name, content, turn_id) VALUES (?, ?, ?, ?, ?)",
+            ((task_id, i, name, data, turn_id) for i, (name, data) in enumerate(uploads.items(), start)),
+        )
+
+    def _upload_bytes(self, task_id: str, entry: sqlite3.Row) -> bytes:
+        if entry["content"] is not None:
+            return entry["content"]
+        # Version 1 stored source bytes on disk under their immutable position.
+        return (self._workspace(task_id) / "inputs" / str(entry["position"])).read_bytes()
 
     def read_uploads(self, task_id: str) -> dict[str, str]:
         with self._connection() as connection:
-            entries = self._uploads(connection, task_id)
-        inputs = self._workspace(task_id) / "inputs"
-        return {
-            entry["name"]: (inputs / str(entry["position"])).read_bytes().decode("utf-8")
-            for entry in entries
-        }
+            entries = connection.execute(
+                "SELECT name, position, content FROM uploads WHERE task_id = ? ORDER BY position", (task_id,)
+            )
+            return {entry["name"]: self._upload_bytes(task_id, entry).decode("utf-8") for entry in entries}
 
     def read_upload(self, task_id: str, name: str) -> bytes | None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT position FROM uploads WHERE task_id = ? AND name = ?", (task_id, name)
+                "SELECT position, content FROM uploads WHERE task_id = ? AND name = ?", (task_id, name)
             ).fetchone()
         if row is None:
             return None
-        return (self._workspace(task_id) / "inputs" / str(row["position"])).read_bytes()
+        return self._upload_bytes(task_id, row)
 
     def _running_turn(self, connection: sqlite3.Connection, task_id: str, turn_id: int | None) -> int:
         row = self._latest_turn(connection, task_id)
