@@ -65,6 +65,8 @@ The tests run with a model double and require no API key. The initial image buil
 
 Open **Weekly responsibility** and choose **Run now** to queue an assignment using the saved request. The next weekly run stays at its scheduled time. If an on-demand assignment is still queued, running, or waiting for your input, **Run now** opens that assignment.
 
+Each new occurrence can read the revision of the previous brief that was current when its worker started. Ask the responsibility to compare fresh sources with that brief and report material changes. [Try three consecutive runs on GitHub data](docs/weekly-responsibility.md#compare-three-runs).
+
 ## Run the quote demonstration
 
 Upload both CSVs from [examples/quotes](examples/quotes) and submit the request in [the first-task brief](docs/first-task.md). When the assignment completes, open its CSV comparison and Markdown recommendation. Recreate the container from the same Compose project, then reopen the files from the assignment list and submit a fresh request.

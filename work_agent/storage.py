@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS schedule_occurrences (
     schedule_id INTEGER NOT NULL REFERENCES weekly_schedules(id),
     due_at INTEGER NOT NULL,
     task_id TEXT NOT NULL PRIMARY KEY REFERENCES tasks(id),
-    manual INTEGER NOT NULL DEFAULT 0 CHECK (manual IN (0, 1))
+    manual INTEGER NOT NULL DEFAULT 0 CHECK (manual IN (0, 1)),
+    prior_resolved INTEGER NOT NULL DEFAULT 0 CHECK (prior_resolved IN (0, 1))
 )
 """
 
@@ -89,6 +90,15 @@ CREATE TABLE IF NOT EXISTS turn_artifacts (
     name TEXT NOT NULL,
     revision INTEGER NOT NULL,
     PRIMARY KEY (turn_id, name)
+);
+CREATE TABLE IF NOT EXISTS prior_artifacts (
+    reference_id INTEGER PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    source_task_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    FOREIGN KEY (source_task_id, name, revision) REFERENCES artifact_revisions(task_id, name, revision),
+    UNIQUE (task_id, source_task_id, name, revision)
 );
 CREATE TABLE IF NOT EXISTS staged_artifacts (
     turn_id INTEGER NOT NULL REFERENCES turns(id),
@@ -175,8 +185,8 @@ class Store:
                 if "turn_id" not in {column["name"] for column in columns}:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN turn_id INTEGER REFERENCES turns(id)")
             connection.execute("CREATE INDEX IF NOT EXISTS events_turn ON events(turn_id, id)")
-            columns = connection.execute("PRAGMA table_info(schedule_occurrences)")
-            if "manual" not in {column["name"] for column in columns}:
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(schedule_occurrences)")}
+            if "manual" not in columns:
                 connection.execute("ALTER TABLE schedule_occurrences RENAME TO schedule_occurrences_legacy")
                 connection.execute(SCHEDULE_OCCURRENCES_TABLE)
                 connection.execute(
@@ -184,6 +194,17 @@ class Store:
                     SELECT schedule_id, due_at, task_id FROM schedule_occurrences_legacy"""
                 )
                 connection.execute("DROP TABLE schedule_occurrences_legacy")
+            elif "prior_resolved" not in columns:
+                connection.execute(
+                    "ALTER TABLE schedule_occurrences ADD COLUMN prior_resolved INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (prior_resolved IN (0, 1))"
+                )
+            if "prior_resolved" not in columns:
+                # Preserve what already-started assignments actually saw on older deployments.
+                connection.execute(
+                    """UPDATE schedule_occurrences SET prior_resolved = 1
+                    WHERE task_id NOT IN (SELECT task_id FROM turns WHERE kind = 'initial' AND status = 'queued')"""
+                )
             connection.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS one_scheduled_occurrence
                 ON schedule_occurrences (schedule_id, due_at) WHERE manual = 0"""
@@ -322,27 +343,11 @@ class Store:
                 FROM schedule_occurrences AS occurrence
                 JOIN tasks AS task ON task.id = occurrence.task_id
                 WHERE occurrence.schedule_id = ?
-                ORDER BY occurrence.due_at DESC, task.rowid DESC LIMIT 1
+                ORDER BY task.rowid DESC LIMIT 1
                 """,
                 (schedule["id"],),
             ).fetchone()
-            brief_files = connection.execute(
-                """
-                WITH brief_turn AS (
-                    SELECT occurrence.task_id, occurrence.due_at, occurrence.manual, turn.id AS turn_id
-                    FROM schedule_occurrences AS occurrence
-                    JOIN tasks AS task ON task.id = occurrence.task_id
-                    JOIN turns AS turn ON turn.task_id = occurrence.task_id AND turn.status = 'completed'
-                    JOIN artifact_revisions AS artifact ON artifact.turn_id = turn.id
-                    WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
-                    ORDER BY occurrence.due_at DESC, task.rowid DESC, turn.id ASC LIMIT 1
-                )
-                SELECT brief_turn.task_id, brief_turn.due_at, brief_turn.manual, artifact.name
-                FROM brief_turn JOIN artifact_revisions AS artifact USING (task_id, turn_id)
-                WHERE artifact.name LIKE '%.md' ORDER BY artifact.name
-                """,
-                (schedule["id"],),
-            ).fetchall()
+            brief_files = self._latest_brief_files(connection, schedule["id"])
             latest_brief = None
             if brief_files:
                 latest_brief = {
@@ -356,6 +361,69 @@ class Store:
                 "latest_run": dict(latest_run) if latest_run else None,
                 "latest_brief": latest_brief,
             }
+
+    def _latest_brief_files(self, connection, schedule_id: int, *, before_task_id: str | None = None):
+        # The first completed turn that published Markdown defines this occurrence's brief files.
+        # Later user edits and follow-ups can revise those files without adding unrelated ones.
+        return connection.execute(
+            """
+            WITH brief_turn AS (
+                SELECT occurrence.task_id, occurrence.due_at, occurrence.manual, turn.id AS turn_id
+                FROM schedule_occurrences AS occurrence
+                JOIN tasks AS task ON task.id = occurrence.task_id
+                JOIN turns AS turn ON turn.task_id = task.id AND turn.status = 'completed'
+                JOIN artifact_revisions AS artifact ON artifact.turn_id = turn.id
+                WHERE occurrence.schedule_id = ? AND artifact.name LIKE '%.md'
+                    AND (? IS NULL OR task.rowid < (SELECT rowid FROM tasks WHERE id = ?))
+                ORDER BY task.rowid DESC, turn.id ASC LIMIT 1
+            )
+            SELECT brief_turn.task_id, brief_turn.due_at, brief_turn.manual, artifact.name,
+                (SELECT MAX(revision) FROM artifact_revisions
+                 WHERE task_id = brief_turn.task_id AND name = artifact.name) AS revision
+            FROM brief_turn JOIN artifact_revisions AS artifact USING (task_id, turn_id)
+            WHERE artifact.name LIKE '%.md' ORDER BY artifact.name
+            """,
+            (schedule_id, before_task_id, before_task_id),
+        ).fetchall()
+
+    def _pin_previous_brief(self, connection, task_id: str) -> None:
+        # Freeze the selection (including no previous brief) as part of the first claim.
+        occurrence = connection.execute(
+            """UPDATE schedule_occurrences SET prior_resolved = 1
+            WHERE task_id = ? AND prior_resolved = 0 RETURNING schedule_id""",
+            (task_id,),
+        ).fetchone()
+        if occurrence:
+            files = self._latest_brief_files(connection, occurrence["schedule_id"], before_task_id=task_id)
+            connection.executemany(
+                "INSERT INTO prior_artifacts (task_id, source_task_id, name, revision) VALUES (?, ?, ?, ?)",
+                ((task_id, row["task_id"], row["name"], row["revision"]) for row in files),
+            )
+
+    def _prior_artifacts(self, connection, task_id: str, reference_id: int | None = None) -> list[dict]:
+        query = """SELECT pin.reference_id, pin.source_task_id, pin.name, pin.revision, saved.author
+            FROM prior_artifacts AS pin JOIN artifact_revisions AS saved
+                ON saved.task_id = pin.source_task_id AND saved.name = pin.name AND saved.revision = pin.revision
+            WHERE pin.task_id = ?"""
+        if reference_id is None:
+            rows = connection.execute(query + " ORDER BY pin.reference_id", (task_id,))
+        else:
+            rows = connection.execute(query + " AND pin.reference_id = ?", (task_id, reference_id))
+        return [dict(row) for row in rows]
+
+    def prior_artifact(self, task_id: str, reference_id: int) -> dict | None:
+        if type(reference_id) is not int or not 0 < reference_id <= 2**63 - 1:
+            return None
+        with self._connection() as connection:
+            rows = self._prior_artifacts(connection, task_id, reference_id)
+            return rows[0] if rows else None
+
+    def read_prior_artifact(self, task_id: str, reference_id: int) -> bytes | None:
+        pin = self.prior_artifact(task_id, reference_id)
+        if pin is None:
+            return None
+        saved = self.artifact_revision(pin["source_task_id"], pin["name"], pin["revision"])
+        return saved["content"] if saved else None
 
     def stop_schedule(self, schedule_id: int, *, now: datetime) -> None:
         stopped_at = self._schedule_epoch(now)
@@ -452,6 +520,7 @@ class Store:
                     "SELECT DISTINCT name FROM artifact_revisions WHERE task_id = ? ORDER BY name", (task_id,)
                 )
             ]
+            task["prior_artifacts"] = self._prior_artifacts(connection, task_id)
             task["can_follow_up"] = self._can_follow_up(connection, task_id, task["status"])
             return task
 
@@ -594,6 +663,7 @@ class Store:
             if row is None:
                 return None
             task_id = row["id"]
+            self._pin_previous_brief(connection, task_id)
             turn_id = connection.execute(
                 "UPDATE turns SET status = 'running' WHERE task_id = ? AND status = 'queued' RETURNING id",
                 (task_id,),
@@ -653,6 +723,7 @@ class Store:
                 "kind": active["kind"],
                 "attached_files": source_turn.get("attached_files", []),
                 "prior_messages": messages,
+                "prior_artifacts": self._prior_artifacts(connection, task_id),
                 "artifacts": {
                     row["name"]: {"revision": row["revision"], "author": row["author"]} for row in artifacts
                 },
@@ -805,6 +876,7 @@ class Store:
                 "uploads": [entry["name"] for entry in self._uploads(connection, task_id)],
                 "steps": steps,
                 "turns": turns,
+                "prior_artifacts": self._prior_artifacts(connection, task_id),
             }
 
     def complete(self, task_id: str, response: str, *, turn_id: int | None = None) -> None:

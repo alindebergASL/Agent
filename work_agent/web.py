@@ -84,6 +84,8 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         attached_files=run["attached_files"] if run["kind"] != "initial" else None,
                         saved_artifacts=run["artifacts"],
                         read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
+                        prior_artifacts=run["prior_artifacts"],
+                        read_prior_artifact=lambda reference_id: store.read_prior_artifact(task_id, reference_id),
                         tool_scope=tool_scope,
                         connected_catalog=catalog,
                         method_index=method_index,
@@ -571,6 +573,15 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         except KeyError:
             raise HTTPException(404, "Saved method not found.") from None
         return RedirectResponse(request.url_for("methods"), status_code=303)
+
+    @app.get("/tasks/{task_id}/prior-artifacts/{reference_id}")
+    def prior_artifact(request: Request, task_id: str, reference_id: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
+        prior = store.prior_artifact(task_id, reference_id)
+        if prior is None:
+            raise HTTPException(404, "Prior revision not found.")
+        url = request.url_for("artifact", task_id=prior["source_task_id"], name=prior["name"])
+        # Relative citations in the earlier report resolve within its original assignment.
+        return RedirectResponse(url.include_query_params(revision=prior["revision"]), status_code=303)
 
     @app.get("/tasks/{task_id}/evidence/{source_ref}")
     def source_evidence(request: Request, task_id: str, source_ref: str):
