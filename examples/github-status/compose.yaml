@@ -1,0 +1,20 @@
+services:
+  app:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    environment:
+      WORK_AGENT_MCP_CONFIG: /run/work-agent/github-sources.json
+    volumes:
+      - ./examples/github-status/sources.json:/run/work-agent/github-sources.json:ro
+    depends_on:
+      github:
+        condition: service_healthy
+
+  github:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    pull_policy: never
+    command: ["python", "-m", "work_agent.github_source", "--host", "0.0.0.0", "--port", "8000", "--repository", "${WORK_AGENT_GITHUB_REPOSITORY:-alindebergASL/Agent}"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

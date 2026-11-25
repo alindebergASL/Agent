@@ -22,12 +22,16 @@ from work_agent.runner import AssignmentError
 from work_agent.web import create_app
 
 
-@contextmanager
 def serve_source(role, path):
+    return serve_mcp(create_server(role, path))
+
+
+@contextmanager
+def serve_mcp(source):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-        app = create_server(role, path).streamable_http_app(stateless_http=True, json_response=True)
+        app = source.streamable_http_app(stateless_http=True, json_response=True)
         server = uvicorn.Server(uvicorn.Config(app, log_config=None, access_log=False))
         thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
         thread.start()
@@ -35,7 +39,7 @@ def serve_source(role, path):
             deadline = time.monotonic() + 5
             while not server.started:
                 if not thread.is_alive() or time.monotonic() > deadline:
-                    raise RuntimeError(f"{role} fixture could not start")
+                    raise RuntimeError("MCP fixture could not start")
                 time.sleep(0.02)
             yield f"http://127.0.0.1:{port}/mcp"
         finally:
