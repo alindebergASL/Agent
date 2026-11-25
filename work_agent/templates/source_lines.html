@@ -1,0 +1,9 @@
+{% if lines %}
+<ol class="source-lines" aria-label="Original file lines">
+  {% for line in lines %}
+  <li id="L{{ loop.index }}"><a href="#L{{ loop.index }}" aria-label="Line {{ loop.index }}">{{ loop.index }}</a><code>{{ line }}</code></li>
+  {% endfor %}
+</ol>
+{% else %}
+<p>This file is empty.</p>
+{% endif %}

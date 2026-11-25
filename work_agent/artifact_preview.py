@@ -26,7 +26,7 @@ class ArtifactMarkdown(MarkdownIt):
         # Allow same-assignment source rows without opening arbitrary relative URLs.
         if re.fullmatch(r"\.\./evidence/[a-f0-9]{32}", url):
             return True
-        if re.fullmatch(r"\.\./prior-artifacts/[1-9][0-9]{0,18}", url):
+        if re.fullmatch(r"\.\./prior-artifacts/[1-9][0-9]{0,18}(?:#L[1-9][0-9]{0,6})?", url):
             return True
         citation = UPLOAD_CITATION.fullmatch(url)
         if citation:

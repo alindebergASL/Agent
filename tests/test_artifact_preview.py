@@ -84,10 +84,8 @@ class ArtifactPreviewTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         markup = PreviewMarkup(response.text)
         self.assertEqual(markup.http_links(), [])
-        self.assertEqual(
-            sum(tag == "a" for tag, _ in markup.elements), 3,
-            "Only the app navigation and download links should be active.",
-        )
+        rendered_artifact = PreviewMarkup(response.context["markdown_html"])
+        self.assertFalse(any(tag == "a" for tag, _ in rendered_artifact.elements))
         self.assertTrue(all(tag not in {"script", "img"} for tag, _ in markup.elements))
         self.assertIn("&lt;script&gt;", response.text)
         self.assertIn("Raw markup&lt;/a&gt;", response.text)

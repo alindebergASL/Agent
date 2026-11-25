@@ -86,6 +86,10 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         read_saved_artifact=lambda name: store.read_run_artifact(task_id, turn_id, name),
                         prior_artifacts=run["prior_artifacts"],
                         read_prior_artifact=lambda reference_id: store.read_prior_artifact(task_id, reference_id),
+                        search_saved_work=lambda query: store.search_saved_work(task_id, query),
+                        pin_saved_work=lambda source_task_id, name, revision: store.pin_saved_work(
+                            task_id, source_task_id, name, revision
+                        ),
                         tool_scope=tool_scope,
                         connected_catalog=catalog,
                         method_index=method_index,
@@ -197,11 +201,14 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=APP_DIR / "templates")
 
-    def render_index(request, *, error=None, draft="", status_code=200):
+    def render_index(request, *, prior_revision=None, error=None, draft="", status_code=200):
         return templates.TemplateResponse(
             request=request,
             name="index.html",
-            context={"tasks": store.list_tasks(), "enabled": model is not None, "error": error, "draft": draft},
+            context={
+                "tasks": store.list_tasks(), "enabled": model is not None, "error": error, "draft": draft,
+                "prior_revision": prior_revision,
+            },
             status_code=status_code,
         )
 
@@ -288,17 +295,19 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         wake.set()
         return RedirectResponse(request.url_for("responsibility"), status_code=303)
 
-    @app.post("/tasks")
-    async def submit(request: Request):
+    async def submit_assignment(request: Request, prior_revision=None):
         check_form_origin(request)
         if model is None:
-            return render_index(request, error="Configure a model before submitting an assignment.", status_code=503)
+            return render_index(request, prior_revision=prior_revision,
+                                error="Configure a model before submitting an assignment.", status_code=503)
 
         try:
             check_form_size(request, MAX_FORM_BYTES)
         except HTTPException:
-            return render_index(request, error="The upload is too large or has no content length.", status_code=413)
+            return render_index(request, prior_revision=prior_revision,
+                                error="The upload is too large or has no content length.", status_code=413)
 
+        draft = ""
         try:
             async with request.form(
                 max_files=MAX_FILES, max_fields=1, max_part_size=MAX_REQUEST_CHARS * 4
@@ -306,14 +315,32 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
                 draft = form.get("request", "")
                 prompt = assignment_request(draft)
                 uploads = await read_form_uploads(form)
+            task_id = await asyncio.to_thread(store.submit, prompt, uploads, prior_revision=prior_revision)
         except HTTPException as exc:
-            return render_index(request, error=exc.detail, status_code=400)
+            return render_index(request, prior_revision=prior_revision, draft=draft, error=exc.detail, status_code=400)
         except ValueError as exc:
-            return render_index(request, error=str(exc), status_code=400)
+            return render_index(request, prior_revision=prior_revision, draft=draft, error=str(exc), status_code=400)
 
-        task_id = await asyncio.to_thread(store.submit, prompt, uploads)
         wake.set()
         return RedirectResponse(request.url_for("assignment", task_id=task_id), status_code=303)
+
+    @app.post("/tasks")
+    async def submit(request: Request):
+        return await submit_assignment(request)
+
+    reuse_path = "/tasks/{task_id}/artifacts/{name}/revisions/{revision}/new-assignment"
+
+    @app.get(reuse_path)
+    def new_from_revision(request: Request, task_id: str, name: str,
+                          revision: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
+        if store.artifact_revision(task_id, name, revision) is None:
+            raise HTTPException(404, "Saved revision not found.")
+        return render_index(request, prior_revision=(task_id, name, revision))
+
+    @app.post(reuse_path)
+    async def submit_from_revision(request: Request, task_id: str, name: str,
+                                   revision: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
+        return await submit_assignment(request, (task_id, name, revision))
 
     def render_assignment(
         request, task_id, *, draft="", error=None, reply_to=None, correction_draft="", control_error=None, status_code=200,

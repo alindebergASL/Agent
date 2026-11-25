@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
@@ -210,6 +211,7 @@ class Store:
                 ON schedule_occurrences (schedule_id, due_at) WHERE manual = 0"""
             )
             self._migrate_tasks(connection)
+            self._initialize_saved_work_search(connection)
             connection.execute(
                 "UPDATE turns SET status = 'interrupted', error = ? WHERE status = 'running'",
                 (INTERRUPTED,),
@@ -226,6 +228,27 @@ class Store:
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise RuntimeError("Assignment database migration found a broken reference.")
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _initialize_saved_work_search(self, connection: sqlite3.Connection) -> None:
+        if connection.execute("SELECT 1 FROM sqlite_schema WHERE name = 'saved_work_search'").fetchone():
+            return
+        connection.execute(
+            """CREATE VIRTUAL TABLE saved_work_search USING fts5(
+                source_task_id UNINDEXED, name, request, tokenize='unicode61 remove_diacritics 2')"""
+        )
+        # Assignment requests and first publications are immutable. Index each file once,
+        # including the turn that introduced it when it differs from the original request.
+        select_metadata = """SELECT saved.task_id, saved.name,
+                CASE WHEN turn.request IS NOT NULL AND turn.request != task.request
+                     THEN task.request || char(10) || turn.request ELSE task.request END
+            FROM artifact_revisions AS saved JOIN tasks AS task ON task.id = saved.task_id
+            LEFT JOIN turns AS turn ON turn.id = saved.turn_id WHERE saved.revision = 1"""
+        connection.execute("INSERT INTO saved_work_search " + select_metadata)
+        connection.execute(
+            """CREATE TRIGGER index_published_artifact AFTER INSERT ON artifact_revisions
+            WHEN NEW.revision = 1 BEGIN INSERT INTO saved_work_search """
+            + select_metadata + " AND saved.task_id = NEW.task_id AND saved.name = NEW.name; END"
+        )
 
     def _upgrade_turn_schema(self, connection: sqlite3.Connection) -> None:
         existing = {row["name"] for row in connection.execute(
@@ -289,10 +312,14 @@ class Store:
                             (task_id, path.name, path.read_bytes(), turn_id),
                         )
 
-    def submit(self, request: str, uploads: dict[str, bytes]) -> str:
+    def submit(
+        self, request: str, uploads: dict[str, bytes], *, prior_revision: tuple[str, str, int] | None = None
+    ) -> str:
         task_id = uuid.uuid4().hex
         with self._connection() as connection:
             turn_id = self._insert_task(connection, task_id, request)
+            if prior_revision is not None:
+                self._pin_saved_work(connection, task_id, *prior_revision)
             self._add_uploads(connection, task_id, turn_id, uploads)
         return task_id
 
@@ -417,6 +444,55 @@ class Store:
         with self._connection() as connection:
             rows = self._prior_artifacts(connection, task_id, reference_id)
             return rows[0] if rows else None
+
+    def search_saved_work(self, task_id: str, query: str) -> list[dict]:
+        if not isinstance(query, str) or len(query) > 200:
+            raise ValueError("Search with up to 200 characters of keywords or a filename.")
+        terms = re.findall(r"[^\W_]+", unicodedata.normalize("NFC", query))
+        if not terms:
+            raise ValueError("Search with a keyword or filename containing letters or numbers.")
+        # Treat punctuation and FTS operators as user input. Every term must match.
+        match = " AND ".join(f'"{term}"' for term in dict.fromkeys(terms))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT hit.source_task_id, hit.name,
+                       (SELECT MAX(revision) FROM artifact_revisions
+                        WHERE task_id = hit.source_task_id AND name = hit.name) AS revision,
+                       substr(snippet(saved_work_search, 2, '', '', ' … ', 28), 1, 240) AS request,
+                       task.created_at
+                   FROM saved_work_search AS hit JOIN tasks AS task ON task.id = hit.source_task_id
+                   WHERE saved_work_search MATCH ? AND hit.source_task_id != ?
+                   ORDER BY (hit.name = ? COLLATE NOCASE) DESC, bm25(saved_work_search, 0, 4, 1),
+                            task.created_at DESC, task.rowid DESC, hit.name LIMIT 8""",
+                (match, task_id, query.strip()),
+            )
+            return [dict(row) for row in rows]
+
+    def _pin_saved_work(self, connection, task_id: str, source_task_id: str, name: str, revision: int) -> dict:
+        if (not isinstance(source_task_id, str) or task_id == source_task_id
+                or not isinstance(name, str) or not ARTIFACT_NAME.fullmatch(name)
+                or type(revision) is not int or not 0 < revision <= 2**63 - 1):
+            raise ValueError("Choose a published revision from another assignment.")
+        connection.execute(
+            """INSERT INTO prior_artifacts (task_id, source_task_id, name, revision)
+               SELECT consumer.id, saved.task_id, saved.name, saved.revision
+               FROM artifact_revisions AS saved JOIN tasks AS consumer ON consumer.id = ?
+               WHERE saved.task_id = ? AND saved.name = ? AND saved.revision = ?
+               ON CONFLICT(task_id, source_task_id, name, revision) DO NOTHING""",
+            (task_id, source_task_id, name, revision),
+        )
+        pin = connection.execute(
+            """SELECT reference_id FROM prior_artifacts
+               WHERE task_id = ? AND source_task_id = ? AND name = ? AND revision = ?""",
+            (task_id, source_task_id, name, revision),
+        ).fetchone()
+        if pin is None:
+            raise ValueError("Choose a published revision from another assignment.")
+        return self._prior_artifacts(connection, task_id, pin["reference_id"])[0]
+
+    def pin_saved_work(self, task_id: str, source_task_id: str, name: str, revision: int) -> dict:
+        with self._connection() as connection:
+            return self._pin_saved_work(connection, task_id, source_task_id, name, revision)
 
     def read_prior_artifact(self, task_id: str, reference_id: int) -> bytes | None:
         pin = self.prior_artifact(task_id, reference_id)
