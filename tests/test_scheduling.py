@@ -66,7 +66,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertIsNone(reopened.enqueue_due_schedule(now=FRIDAY_PDT))
         schedule = reopened.get_schedule()
         self.assertEqual(schedule["latest_run"], {
-            "task_id": first, "due_at": int(FRIDAY_PDT.timestamp()), "status": "queued",
+            "task_id": first, "due_at": int(FRIDAY_PDT.timestamp()), "status": "queued", "manual": 0,
         })
         self.assertEqual(schedule["next_run_at"], int(FRIDAY_PST.timestamp()))
         self.assertIsNone(reopened.enqueue_due_schedule(now=FRIDAY_PST - timedelta(hours=1)))
@@ -138,7 +138,7 @@ class SchedulingTests(unittest.TestCase):
         store.complete(first, "Updated the brief.")
 
         next_task = store.enqueue_due_schedule(now=FRIDAY_PST)
-        expected = {"task_id": first, "due_at": int(FRIDAY_PDT.timestamp()), "names": ["appendix.md", "weekly-brief.md"]}
+        expected = {"task_id": first, "due_at": int(FRIDAY_PDT.timestamp()), "manual": 0, "names": ["appendix.md", "weekly-brief.md"]}
         self.assertEqual(store.get_schedule()["latest_brief"], expected)
         self.assertEqual(store.claim(), next_task)
         store.fail(next_task, "Research unavailable.")
@@ -152,6 +152,63 @@ class SchedulingTests(unittest.TestCase):
             self.assertNotIn("actions.md", page)
             latest = client.get(f"/tasks/{first}/artifacts/weekly-brief.md?download=1")
             self.assertEqual(latest.text, "# Updated brief")
+
+    def test_run_now_reuses_pending_assignment_and_preserves_weekly_occurrence(self):
+        store = self.friday_schedule()
+        schedule_id = store.get_schedule()["id"]
+        manual = store.enqueue_schedule_now(schedule_id, now=FRIDAY_PDT)
+        self.assertEqual(store.enqueue_schedule_now(schedule_id, now=FRIDAY_PDT), manual)
+        self.assertEqual(store.get_schedule()["next_run_at"], int(FRIDAY_PDT.timestamp()))
+        self.assertEqual(store.get_schedule()["latest_run"]["manual"], 1)
+        scheduled = store.enqueue_due_schedule(now=FRIDAY_PDT)
+        self.assertNotEqual(manual, scheduled)
+        self.assertEqual(store.get_schedule()["next_run_at"], int(FRIDAY_PST.timestamp()))
+        self.assertIn("run on demand", store.get_task(manual)["request"])
+        self.assertIsNone(store.enqueue_due_schedule(now=FRIDAY_PDT))
+
+    def test_legacy_occurrences_survive_run_now_schema_upgrade(self):
+        store = self.friday_schedule()
+        scheduled = store.enqueue_due_schedule(now=FRIDAY_PDT)
+        with store._connection() as connection:
+            connection.execute("ALTER TABLE schedule_occurrences RENAME TO modern_occurrences")
+            connection.execute(
+                """CREATE TABLE schedule_occurrences (
+                    schedule_id INTEGER NOT NULL REFERENCES weekly_schedules(id),
+                    due_at INTEGER NOT NULL,
+                    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+                    PRIMARY KEY (schedule_id, due_at)
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO schedule_occurrences
+                SELECT schedule_id, due_at, task_id FROM modern_occurrences"""
+            )
+            connection.execute("DROP TABLE modern_occurrences")
+
+        store.initialize()
+        original = store.get_schedule()
+        self.assertEqual(original["latest_run"]["task_id"], scheduled)
+        self.assertEqual(original["latest_run"]["manual"], 0)
+        manual = store.enqueue_schedule_now(original["id"], now=FRIDAY_PDT)
+        self.assertNotEqual(scheduled, manual)
+        self.assertEqual(store.get_schedule()["next_run_at"], original["next_run_at"])
+        with store._connection() as connection:
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_run_now_from_dashboard_publishes_brief(self):
+        store = self.friday_schedule()
+        original = store.get_schedule()
+        with TestClient(create_app(data_dir=self.data, model=BriefModel(), clock=lambda: THURSDAY)) as client:
+            self.assertIn("Run now", client.get("/responsibility").text)
+            response = client.post(f"/responsibility/{original['id']}/run-now", follow_redirects=False)
+            self.assertEqual(response.status_code, 303, response.text)
+            schedule = self.wait_for_brief(client, store)
+            self.assertEqual(schedule["next_run_at"], original["next_run_at"])
+            brief = schedule["latest_brief"]
+            self.assertEqual(brief["manual"], 1)
+            self.assertTrue(response.headers["location"].endswith(f"/tasks/{brief['task_id']}"))
+            self.assertIn("Requested on demand", client.get("/responsibility").text)
+            self.assertEqual(client.get(f"/tasks/{brief['task_id']}/artifacts/{brief['names'][0]}").status_code, 200)
 
     def test_responsibility_dashboard_reopens_a_dated_brief_after_restart(self):
         model = BriefModel()

@@ -15,6 +15,9 @@
   <p class="prose">{{ schedule.request }}</p>
   {% if schedule.stopped_at is none %}
   <p>Next run <time data-next-run-at="{{ schedule.next_run_at }}" datetime="{{ iso_pacific(schedule.next_run_at) }}">{{ format_pacific(schedule.next_run_at) }}</time></p>
+  <form action="{{ url_for('run_responsibility_now', schedule_id=schedule.id) }}" method="post">
+    <button type="submit"{% if not enabled %} disabled{% endif %}>Run now</button>
+  </form>
   <form action="{{ url_for('stop_responsibility', schedule_id=schedule.id) }}" method="post">
     <button type="submit">Stop responsibility</button>
   </form>
@@ -51,14 +54,14 @@
   <h2>Latest run</h2>
   {% if schedule.latest_run %}
   <p>
-    Scheduled for <time data-latest-run-at="{{ schedule.latest_run.due_at }}" datetime="{{ iso_pacific(schedule.latest_run.due_at) }}">{{ format_pacific(schedule.latest_run.due_at) }}</time>
+    {{ "Requested on demand" if schedule.latest_run.manual else "Scheduled for" }} <time data-latest-run-at="{{ schedule.latest_run.due_at }}" datetime="{{ iso_pacific(schedule.latest_run.due_at) }}">{{ format_pacific(schedule.latest_run.due_at) }}</time>
     <span class="status" data-state="{{ schedule.latest_run.status }}" data-latest-run-status="{{ schedule.latest_run.status }}">{{ schedule.latest_run.status|capitalize }}</span>
   </p>
   <p><a href="{{ url_for('assignment', task_id=schedule.latest_run.task_id) }}">Open latest assignment</a></p>
   {% endif %}
   {% if schedule.latest_brief %}
   <h2>Latest brief</h2>
-  <p>Scheduled for <time data-latest-brief-at="{{ schedule.latest_brief.due_at }}" datetime="{{ iso_pacific(schedule.latest_brief.due_at) }}">{{ format_pacific(schedule.latest_brief.due_at) }}</time></p>
+  <p>{{ "Requested on demand" if schedule.latest_brief.manual else "Scheduled for" }} <time data-latest-brief-at="{{ schedule.latest_brief.due_at }}" datetime="{{ iso_pacific(schedule.latest_brief.due_at) }}">{{ format_pacific(schedule.latest_brief.due_at) }}</time></p>
   {% if schedule.latest_brief.names|length == 1 %}
   <p><a href="{{ url_for('artifact', task_id=schedule.latest_brief.task_id, name=schedule.latest_brief.names[0]) }}">Open latest brief</a></p>
   {% else %}
