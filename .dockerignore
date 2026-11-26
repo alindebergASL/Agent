@@ -9,4 +9,5 @@
 !tests/
 !tests/**/
 !tests/**/*.py
+!tests/fixtures/watch-bulletin/*.csv
 **/__pycache__/

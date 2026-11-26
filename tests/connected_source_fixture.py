@@ -1,4 +1,4 @@
-"""Serve one read-only purchasing or warehouse data source for the MCP example."""
+"""Serve a read-only purchasing, warehouse, or bulletin source for the MCP examples."""
 
 import argparse
 import csv
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 PAGE_SIZE = 80
 SOURCE_TOOLS = {
+    "bulletin": ("list_notices", "Read the current complete policy and opportunity bulletin."),
     "purchasing": ("list_orders", "Read purchase-order lines, with identifiers preserved as text."),
     "warehouse": ("list_receipts", "Read individual delivery receipts, with identifiers preserved as text."),
 }

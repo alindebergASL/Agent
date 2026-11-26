@@ -67,6 +67,16 @@ Open **Weekly responsibility** and choose **Run now** to queue an assignment usi
 
 Each new occurrence can read the revision of the previous brief that was current when its worker started. Ask the responsibility to compare fresh sources with that brief and report material changes. [Try three consecutive runs on GitHub data](docs/weekly-responsibility.md#compare-three-runs).
 
+## Watch a decision or look for something new
+
+Open **Watches** to describe what to look for and when it deserves your attention. Each watch has its own daily or weekly Pacific schedule. Use **Check now** for an immediate check. To track a particular saved file or project note, start the watch from that item's page. You can also specify public pages that every successful check must visit.
+
+For example, one watch can follow changes to a return policy while another looks for grants your project qualifies for. Each check can use current project claims and compare fresh source evidence with its own earlier findings. A qualifying opportunity can appear on the first check. Open **Needs your attention** on the dashboard to see what changed and why. **Mark reviewed** preserves the finding in history. A source outage appears in the check history and preserves the last verified result. **Stop** ends future checks on that watch.
+
+Connected-source citations reopen the snapshot saved at check time. Public web citations keep the URL and visit record and open the publisher's current page. Shared note revisions support citations to exact uploads, saved revisions and connected-source snapshots.
+
+[Try the two-watch example](examples/watches/README.md) · [How the agent uses memory before acting](docs/knowledge-foundation.md)
+
 ## Find a file from earlier work
 
 To reuse earlier work, describe an original upload or generated file by name, assignment, or a passage you remember. The agent can find the passage, open the exact version and cite its rows. You can also start a new assignment directly from an open upload or saved revision. [Try the meeting-brief, CSV, and original-quote examples](docs/find-saved-work.md).

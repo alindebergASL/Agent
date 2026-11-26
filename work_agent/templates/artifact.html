@@ -9,6 +9,7 @@
   </div>
   <p class="help">Revision {{ saved.revision }} · {% if saved.author == "user" %}User edit{% else %}Agent{% endif %}</p>
   <p><a href="{{ url_for('new_from_revision', task_id=task_id, name=name, revision=saved.revision) }}">Start an assignment with this revision</a></p>
+  <p><a href="{{ url_for('watches') }}?source_task={{ task_id }}&amp;source_name={{ name|urlencode }}&amp;source_revision={{ saved.revision }}#new-watch">Watch this file from revision {{ saved.revision }}</a></p>
   <p><a href="{{ url_for('evidence_uses', task_id=task_id, kind='artifact', name=name) }}?revision={{ saved.revision }}">Where this revision was used</a></p>
   {% if historical %}<p><a href="{{ url_for('artifact', task_id=task_id, name=name) }}">Current revision</a></p>{% endif %}
   {% if markdown_html is not none %}

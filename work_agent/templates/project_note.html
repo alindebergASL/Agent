@@ -4,6 +4,7 @@
 <a class="back" href="{{ url_for('project_notes') }}">← Project notes</a>
 <section class="panel">
   <h1>{{ note.scope }}</h1>
+  {% if not historical %}<p><a href="{{ url_for('watches') }}?note_id={{ note.id }}#new-watch">Watch this project note</a></p>{% endif %}
   <p>Revision {{ note.revision }} · {{ note.author }} · <time datetime="{{ note.created_at }}">{{ note.created_at }}</time>{% if note.task_id %} · <a href="{{ url_for('assignment', task_id=note.task_id) }}">Source assignment</a>{% endif %}</p>
   {% if note.reason %}<p class="prose">{{ note.reason }}</p>{% endif %}
   <ol>

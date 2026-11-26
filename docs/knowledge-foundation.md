@@ -16,6 +16,14 @@ Suppose a handbook requires manager approval at two labs. An approved addendum e
 
 The Compose app and its durable data have separate lifetimes. Source bytes, published revisions, notes, relationship records and the derived SQLite indexes share the existing named data volume. Replacing the application container reuses that volume. Searching runs locally. Selected passages, claims, tool outputs, and the user's assignment enter the configured model's context. Search covers original text uploads and the latest published CSV or Markdown of each name and assignment. Earlier generated revisions stay directly readable through their citations and history.
 
+## What the agent sees before acting
+
+On ordinary assignments, follow-ups, and watch checks, the worker searches current project notes by scope and claim text. When the request names a scope, or the user starts a watch from a specific note, matching claims enter the first model request with their author, revision, exact source links, and any recorded changes to their evidence. The agent can immediately reopen a source passage. A recorded exception or contradiction identifies what needs rechecking before acting.
+
+Potential matches based on claim text alone appear as scope suggestions. For instance, “write the lantern inventory” could refer to two different sites. The model can open the notes or ask which site the user means. A title or claim needs some matching vocabulary for automatic discovery. The model can also search using alternate wording. A user edit replaces the searchable claim text in the same transaction that creates its new revision. Older revisions remain available for historical questions.
+
+The serialized note preview uses an 8 KiB budget. Full notes and sources remain readable through their usual tools. Run history records the exact memory preview shown at the start of the turn. Subsequent evidence reads and method retrievals have separate receipts. A historical claim can guide a watch's search. Reporting a new finding requires evidence from the current check.
+
 ## Try a change of evidence on EC2
 
 From the PR checkout, use an isolated Compose project with the existing development key in its environment.

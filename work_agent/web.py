@@ -20,9 +20,11 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .note_pages import install_note_pages
+from .watch_pages import install_watch_pages
 from .artifact_preview import is_upload_name, markdown_preview
 from .connected_sources import ConnectedSources
 from .evidence_changes import AssignmentEvidenceChanges
+from . import watch_history, watch_subjects
 from .runner import AssignmentError, NeedsUserInput, OpenAIModel, run_assignment
 from .scheduling import PACIFIC, WEEKDAYS, format_pacific, parse_schedule_time, utc_now
 from .storage import (
@@ -44,7 +46,9 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
     while not stop.is_set():
         wake.clear()
         try:
-            store.enqueue_due_schedule(now=clock())
+            now = clock()
+            store.enqueue_due_schedule(now=now)
+            store.enqueue_due_watches(now=now)
             task_id = store.claim()
         except sqlite3.OperationalError as exc:
             # SQLite's low byte is the primary result code for extended errors too.
@@ -69,10 +73,17 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
 
         try:
             uploads = store.read_uploads(task_id)
+            watch = run.get("watch")
+            if watch:
+                watch["check_date_pacific"] = clock().astimezone(PACIFIC).date().isoformat()
             prior_requests = [m["content"] for m in run["prior_messages"] if m["role"] == "user"]
-            method_index = store.relevant_methods(
-                run["request"], [*prior_requests[-1:], *prior_requests[:1], *(Path(name).stem for name in uploads)]
-            )
+            search_context = [*prior_requests[-1:], *prior_requests[:1], *(Path(name).stem for name in uploads)]
+            method_index = store.relevant_methods(run["request"], search_context)
+            subject = watch.get("subject") if watch else None
+            memory_request = run["request"]
+            if subject and subject["kind"] == "note":
+                memory_request += "\n" + subject["scope"]
+            project_memory = store.relevant_project_memory(memory_request, search_context)
             try:
                 with (sources.open() if sources else nullcontext()) as catalog:
                     response = run_assignment(
@@ -102,8 +113,16 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         task_id=task_id,
                         stage_project_note=lambda **fields: store.stage_project_note(task_id, turn_id, **fields),
                         connected_catalog=catalog,
+                        watch_context=watch,
+                        search_watch_findings=(lambda query, offset: watch_history.search(store, task_id, query, offset))
+                        if watch else None,
+                        stage_watch_assessment=(
+                            (lambda **fields: store.stage_watch_assessment(task_id, turn_id, **fields)) if watch else None
+                        ),
+                        observe_watch_subject=watch_subjects.observer(store, watch["subject"]) if watch and watch.get("subject") else None,
                         change_tracker=AssignmentEvidenceChanges(store, task_id, turn_id),
                         method_index=method_index,
+                        project_memory=project_memory,
                         read_method=store.get_method,
                         stage_method=lambda title, scope, procedure, evidence: store.stage_method(
                             task_id, title, scope, procedure, evidence, turn_id=turn_id,
@@ -212,6 +231,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=APP_DIR / "templates")
     install_note_pages(app, store, templates, check_form_origin, check_form_size)
+    install_watch_pages(app, store, templates, check_form_origin, check_form_size, wake, clock, model is not None)
 
     def render_index(request, *, prior_revision=None, error=None, draft="", status_code=200):
         return templates.TemplateResponse(
@@ -220,6 +240,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             context={
                 "tasks": store.list_tasks(), "enabled": model is not None, "error": error, "draft": draft,
                 "prior_revision": prior_revision,
+                "watch_attention": store.watch_attention(),
             },
             status_code=status_code,
         )

@@ -17,7 +17,11 @@
 {% block body %}
 {% set displayed_turn = task.turns | last %}
 {% set waiting = task.status == "waiting" %}
+{% if task.watch_id %}
+<a class="back" href="{{ url_for('watch_detail', watch_id=task.watch_id) }}#check-{{ task.id }}">← Watch history</a>
+{% else %}
 <a class="back" href="{{ url_for('index') }}">← Assignments</a>
+{% endif %}
 <section class="panel">
   <div class="heading">
     <h1>Assignment</h1>

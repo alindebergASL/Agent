@@ -1,0 +1,10 @@
+{% macro source_links(sources) %}
+{% if sources %}
+<ul class="watch-sources" aria-label="Evidence">
+  {% for source in sources %}
+    {% set label = source|watch_evidence_label %}
+    {% if label %}<li><a href="{{ source }}">{{ label }}</a></li>{% endif %}
+  {% endfor %}
+</ul>
+{% endif %}
+{% endmacro %}

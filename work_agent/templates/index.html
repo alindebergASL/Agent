@@ -1,9 +1,30 @@
 {% extends "base.html" %}
+{% from "watch_evidence.html" import source_links %}
 {% block body %}
+{% if watch_attention %}
+<section class="panel" id="watch-attention">
+  <h2>Needs your attention</h2>
+  {% for notice in watch_attention %}
+  <article class="turn" data-notice-id="{{ notice.id }}">
+    <h3><a href="{{ url_for('watch_detail', watch_id=notice.watch_id) }}#check-{{ notice.task_id }}">{{ notice.title }}</a></h3>
+    <p class="prose">{{ notice.why }}</p>
+    {{ source_links(notice.evidence) }}
+    <p class="help">{{ notice.request|truncate(110) }} · {{ notice.due_at|watch_time }}</p>
+    <div class="watch-controls">
+      <a href="{{ url_for('assignment', task_id=notice.task_id) }}">Open check</a>
+      <form action="{{ url_for('acknowledge_watch', watch_id=notice.watch_id, notice_id=notice.id) }}" method="post">
+        <button type="submit" class="secondary">Mark reviewed</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
 <section class="panel">
   <div class="heading">
     <h1>New assignment</h1>
     <nav class="assignment-nav" aria-label="Assignment features">
+      <a href="{{ url_for('watches') }}">Watches</a>
       <a href="{{ url_for('project_notes') }}">Project notes</a>
       <a href="{{ url_for('methods') }}">Saved methods</a>
       <a href="{{ url_for('responsibility') }}">Weekly responsibility</a>
