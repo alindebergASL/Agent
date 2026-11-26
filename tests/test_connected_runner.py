@@ -81,6 +81,7 @@ class ConnectedRunnerTests(unittest.TestCase):
         events = []
         run_assignment(model, "Read orders.", {}, Mock(), Mock(), events.append, connected_catalog=source)
         source.call.assert_called_once_with(ORDERS, {})
+        self.assertEqual(tool_outputs(events)["arguments"]["error_kind"], "invalid_arguments")
         for step in (item for item in events if item["type"] == "function_call_output"):
             self.assertNotIn("source_ref", step)
             self.assertIn("error", json.loads(step["output"]))

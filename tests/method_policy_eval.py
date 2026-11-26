@@ -11,6 +11,7 @@ import time
 from collections import Counter
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,7 +42,7 @@ CORPUS = [
 ]
 # Populate a larger catalog only for the prefix-size experiment. Every arm receives
 # the same branch-specific procedures alongside the two applicable global methods.
-PREFIX_POLICIES = {"ranked-1": 1, "ranked-3": 3, "ranked-8": 8, "production": None}
+PREFIX_POLICIES = ("ranked-1", "production", "ranked-8", "byte-budget-only")
 BRANCHES = ("Arden", "Birch", "Cliff", "Delta", "Elm", "Fern", "Grove", "Hill", "Iris", "Juniper", "Larch", "Mesa")
 RECORD_ACTIONS = ("Archive signed records", "Check translated records", "Redact public records")
 
@@ -221,26 +222,19 @@ def recent_eight(store, request, context):
     return store.list_methods(limit=8)
 
 
-def prefix_policy(limit):
-    def page(methods, offset):
-        result = method_page(methods, offset)
-        if offset == 0 and limit < len(result["saved_methods"]):
-            return {"saved_methods": result["saved_methods"][:limit], "next_method_offset": limit}
-        return result
-
-    return patch("work_agent.runner.method_page", page)
-
-
 def evaluate(case, arm, mode):
     request, filename, source = inputs(case)
     target_id = 1 if case in FREIGHT_CASES else 2
     model = (OpenAIModel(os.environ["OPENAI_API_KEY"], MODEL, base_url="https://api.openai.com/v1")
              if mode == "live" else FixtureModel(case))
     observed = ObservedModel(model)
-    policy = patch.object(Store, "relevant_methods", recent_eight) if arm == "recent-eight" else nullcontext()
-    if arm in PREFIX_POLICIES and PREFIX_POLICIES[arm] is not None:
-        policy = prefix_policy(PREFIX_POLICIES[arm])
-    with tempfile.TemporaryDirectory() as root, policy, patch.dict(os.environ, {"WORK_AGENT_MCP_CONFIG": ""}):
+    selector = patch.object(Store, "relevant_methods", recent_eight) if arm == "recent-eight" else nullcontext()
+    # Keep the original selection experiment reproducible with its byte-only page.
+    # The production arm of the size experiment uses the unmodified runner.
+    cap = {"ranked-1": 1, "ranked-8": 8}.get(arm)
+    pages = (nullcontext() if arm == "production" else
+             patch("work_agent.runner.method_page", partial(method_page, initial_limit=cap)))
+    with tempfile.TemporaryDirectory() as root, selector, pages, patch.dict(os.environ, {"WORK_AGENT_MCP_CONFIG": ""}):
         store = Store(Path(root))
         seed(store, branch_methods() if arm in PREFIX_POLICIES else ())
         with TestClient(create_app(Path(root), observed)) as client:
@@ -277,7 +271,7 @@ def main():
     mode.add_argument("--fixture", action="store_true")
     mode.add_argument("--live", action="store_true")
     parser.add_argument("--compare-prefixes", action="store_true",
-                        help="Compare 1, 3, and 8 initially ranked methods against the default byte-limited page.")
+                        help="Compare 1, the production default, 8, and a byte-only page of ranked summaries.")
     parser.add_argument("--repeats", type=int, default=2)
     args = parser.parse_args()
     if args.repeats < 1:

@@ -2,11 +2,13 @@
 
 Every assignment and follow-up searches the saved method titles and scopes with SQLite FTS5. English stemming matches inflections, and BM25 gives scope terms more weight than title terms. Matches for the current request come first. The worker also searches the first and latest prior user requests and upload filename stems so a short follow-up can recover the original scope. Selection remains sensitive to the words used in a scope.
 
-Each turn receives a ranked page of short summaries. A page holds about 8 KiB of serialized metadata, and `list_more_methods` can continue through all matching summaries. Opening a procedure with `read_method` records the retrieval in run history. The evidence and source assignment stay accessible from the method page. The search index backfills existing methods and tracks edits, agent publications and removals transactionally.
+Each turn initially receives up to three ranked method summaries within an approximately 8 KiB metadata budget. If more methods match, `list_more_methods` starts at the supplied offset and returns further byte-limited pages until all matches have been offered. Opening a procedure with `read_method` records the retrieval in run history. The three-summary limit applies only to reusable procedures. Project claims and their evidence follow the separate project-memory selection described below.
+
+The evidence and source assignment stay accessible from the method page. The search index backfills existing methods and tracks edits, agent publications and removals transactionally.
 
 ## Paired decision evaluation
 
-The experiment compares the existing recent-eight policy and scope-based selection on the same requests, source bytes, method corpus, model instructions, tools and application worker. Only the method selector changes. Each arm uses a temporary database. Trials alternate policy order. The target purchasing and release procedures are both older than the eight newest entries. A recent ocean freight method provides a plausible but out-of-scope match.
+The historical experiment compares the recent-eight policy and scope-based selection on the same requests, source bytes, method corpus, model instructions, tools and application worker. Both arms retain their original byte-only pagination so only the selector changes. Each arm uses a temporary database. Trials alternate policy order. The target purchasing and release procedures are both older than the eight newest entries. A recent ocean freight method provides a plausible but out-of-scope match.
 
 | Assignment | Expected action from the source |
 | --- | --- |
@@ -34,7 +36,9 @@ docker compose -p agent-knowledge-eval run --rm --build --no-deps app python -m 
 
 ## How many method summaries should arrive before the first action?
 
-This optional experiment compares an initial page of 1, 3, or 8 relevance-ranked method summaries with the production byte-limited page. All four arms see the same five scenarios, source files, model instructions, and ranking. The catalog includes additional branch-specific procedures so each size exposes a different number of summaries. The model can page through the remaining methods in every arm. The report records initial IDs, further pages read, procedure reads, grounded decisions, and tokens. Compare decision quality and effort together before choosing a limit.
+The four arms show one ranked summary, the production preview of three, eight ranked summaries, or the former byte-only preview. All four see the same five scenarios, source files, model instructions and ranking. The catalog includes additional branch-specific procedures so each size exposes a different number of summaries. The model can page through the remaining matches in every arm. The report records initial IDs, further pages read, procedure reads, grounded decisions and tokens.
+
+On the initial live EC2 run, all four arms produced 10/10 correct, cited decisions. Showing three methods surfaced the target immediately in all ten trials, required zero extra pages and used 505,873 input tokens. The former byte-only page exposed 21 summaries on this catalog, required three additional page reads and used 639,619 input tokens. These results motivated the three-summary default for this model. In reports from PR #17 the columns labeled `ranked-3` and `production` correspond to today's `production` and `byte-budget-only`, respectively. [Original live verification](https://github.com/alindebergASL/Agent/pull/17#issuecomment-7180686943)
 
 ```bash
 docker compose -p agent-knowledge-eval run --rm --build --no-deps app python -m tests.method_policy_eval --live --compare-prefixes --repeats 2 > method-prefix-live.json

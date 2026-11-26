@@ -1,10 +1,12 @@
 """Explicit, scoped relationships between exact lines in immutable evidence."""
 
 import json
+import re
 from urllib.parse import quote
 
 
 RELATIONSHIPS = ("supersedes", "qualifies", "contradicts")
+SNAPSHOT_URL = re.compile(r"(?:\.\.|/tasks/[0-9a-f]{32})/evidence/[0-9a-f]{32}(?:#.*)?")
 PAGE_SIZE = 20
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS evidence_changes (
@@ -29,7 +31,7 @@ TOOL_PARAMETERS = {
 }
 
 INSTRUCTIONS = (
-    " When two read passages materially change the evidence, use stage_evidence_change to record the "
+    " When two numbered file passages already read materially change the evidence, use stage_evidence_change to record the "
     "source relationship, its applicable scope and the reason. Use supersedes only for an established "
     "replacement, qualifies for a narrower condition or exception, and contradicts for unresolved conflict. "
     "A later date alone does not establish supersession. A document can have different rules in different "
@@ -37,7 +39,9 @@ INSTRUCTIONS = (
     "and revisit the cited passages when deciding whether to revise, reaffirm or leave a conclusion open. "
     "On current project notes, claim_number identifies the claim whose cited line changed. "
     "If the summary is truncated, read individual claim citations for the remaining relationships. "
-    "Open either canonical source URL with read_cited_evidence to verify the exact bytes."
+    "Open either canonical source URL with read_cited_evidence to verify the exact bytes. "
+    "Connected tools return whole snapshots. Cite their exact evidence URLs together in the finding, "
+    "report or project note when explaining a change between snapshots."
 )
 
 
@@ -139,13 +143,23 @@ class AssignmentEvidenceChanges:
         self.store = store
         self.task_id = task_id
         self.turn_id = turn_id
+        self._read_lines = set()
+
+    @property
+    def has_two_lines(self):
+        return len(self._read_lines) == 2
 
     def stage(self, arguments, read_lines):
         if arguments.keys() != TOOL_PARAMETERS.keys():
             raise ValueError("Supply both source lines, their relationship, scope and reason.")
-        for key in ("new_source", "earlier_source"):
-            if not isinstance(arguments[key], str) or arguments[key] not in read_lines:
-                raise ValueError("Read both exact source lines in an earlier response before linking them.")
+        sources = (arguments["new_source"], arguments["earlier_source"])
+        if any(isinstance(url, str) and SNAPSHOT_URL.fullmatch(url) for url in sources):
+            raise ValueError("Connected snapshot URLs identify whole tool results. Cite their exact URLs directly "
+                             "in the finding, report or project note and explain the change there.")
+        if not all(isinstance(url, str) and url in read_lines for url in sources):
+            raise ValueError("Read both exact source lines in an earlier response before linking them.")
+        if any(not read_lines[url][1].strip() for url in sources):
+            raise ValueError("Choose source lines containing the passages that changed.")
         return self.store.stage_evidence_change(self.task_id, self.turn_id, **arguments)
 
     def annotate(self, tool, result):
@@ -156,6 +170,15 @@ class AssignmentEvidenceChanges:
             return result
         if not result.get("lines"):
             return result
+        # A pinned URL and a canonical URL can refer to the very same line.
+        # Retain at most two identities to decide when the model can use the tool.
+        if not self.has_two_lines:
+            file_identity = (result.get("source_task_id", self.task_id), result["file_id"], result.get("revision"))
+            for line in result["lines"]:
+                if line["text"].strip():
+                    self._read_lines.add((*file_identity, line["number"]))
+                    if self.has_two_lines:
+                        break
         page = self.store.evidence_changes(
             result.get("source_task_id", self.task_id), result["file_id"], result.get("revision"),
             start_line=result["lines"][0]["number"], end_line=result["lines"][-1]["number"],

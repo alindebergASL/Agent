@@ -23,6 +23,7 @@ class ConnectedSourceTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"TEST_SOURCE_BEARER": "only-the-source-should-see-this"}))
         self.requests = []
         self.result = {"content": [], "structuredContent": {"records": [{"po": "000731"}]}}
+        self.rpc_error = None
         self.pages = [
             {"tools": [tool("other", readOnlyHint=True), tool("edit", readOnlyHint=False)], "nextCursor": "more"},
             {"tools": [tool("lookup", readOnlyHint=True), tool("destructive", readOnlyHint=True, destructiveHint=True)]},
@@ -45,7 +46,7 @@ class ConnectedSourceTests(unittest.TestCase):
                 response = {"result": self.pages[bool(rpc.get("params", {}).get("cursor"))]}
             elif method == "tools/call":
                 self.assertEqual(rpc["params"]["name"], "lookup")
-                response = {"result": self.result}
+                response = {"error": self.rpc_error} if self.rpc_error else {"result": self.result}
             else:
                 raise AssertionError(method)
             return httpx2.Response(200, json={"jsonrpc": "2.0", "id": rpc["id"], **response})
@@ -98,6 +99,7 @@ class ConnectedSourceTests(unittest.TestCase):
         ).open() as catalog:
             self.assertEqual([t["name"] for t in catalog.tools], ["mcp_ok__lookup"])
             self.assertEqual(len(catalog.warnings), 2)
+            self.assertIn("Source missing is unavailable because its configured credential is missing.", catalog.warnings)
         self.assertEqual({r.url.host for r in self.requests}, {"redirect.example", "ok.example"})
 
     def test_limits_remote_errors_and_text(self):
@@ -112,7 +114,23 @@ class ConnectedSourceTests(unittest.TestCase):
             self.result = {"content": [{"type": "text", "text": os.environ["TEST_SOURCE_BEARER"]}]}
             self.assertNotIn(os.environ["TEST_SOURCE_BEARER"], read()["error"])
             self.result["isError"] = True
-            self.assertNotIn(os.environ["TEST_SOURCE_BEARER"], read()["error"])
+            failed = read()
+            self.assertEqual(failed["error_kind"], "source_tool_error")
+            self.assertNotIn("arguments", failed["error"])
+            self.assertNotIn(os.environ["TEST_SOURCE_BEARER"], json.dumps(failed))
+            self.assertNotIn("data", failed)
+
+    def test_protocol_errors_use_only_reported_codes(self):
+        secret = os.environ["TEST_SOURCE_BEARER"]
+        with self.config({"name": "demo", "url": "https://left.example/mcp", "tools": ["lookup"]}).open() as catalog:
+            for code, expected in [(-32602, "invalid_arguments"), (-32001, "timeout"),
+                                   (-32000, "transport_error"), (-32603, "protocol_error")]:
+                self.rpc_error = {"code": code, "message": secret, "data": {"private": secret}}
+                failed = catalog.call("mcp_demo__lookup", {})
+                with self.subTest(code=code):
+                    self.assertEqual(failed["error_kind"], expected)
+                    self.assertNotIn(secret, json.dumps(failed))
+                    self.assertNotIn("data", failed)
 
     def test_slow_discovery_is_bounded_and_releases_the_worker(self):
         async def stall(*_, **__):
@@ -123,6 +141,18 @@ class ConnectedSourceTests(unittest.TestCase):
             with sources.open() as catalog:
                 self.assertEqual(catalog.warnings, ["Source slow is unavailable."])
                 self.assertEqual(catalog.tools, [])
+
+    def test_timed_out_tool_read_can_recover(self):
+        async def stall(*_, **__):
+            await anyio.sleep_forever()
+
+        sources = self.config({"name": "demo", "url": "https://left.example/mcp", "tools": ["lookup"]})
+        with sources.open() as catalog:
+            with patch("work_agent.connected_sources.READ_TIMEOUT", 0.1), patch("mcp.ClientSession.call_tool", new=stall):
+                failed = catalog.call("mcp_demo__lookup", {})
+            self.assertEqual(failed["error_kind"], "timeout")
+            self.assertNotIn("data", failed)
+            self.assertEqual(catalog.call("mcp_demo__lookup", {})["data"], self.result["structuredContent"])
 
     def test_close_failure_does_not_overwrite_assignment_outcome(self):
         @asynccontextmanager
