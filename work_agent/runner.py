@@ -295,7 +295,7 @@ READ_CITED = _tool(
 )
 STAGE_EVIDENCE_CHANGE = _tool(
     "stage_evidence_change",
-    "Record how a new source supersedes, qualifies or contradicts an earlier source within an explicit scope.",
+    "Link two previously read, numbered lines of an upload or saved file revision and state what changed in scope.",
     evidence_changes.TOOL_PARAMETERS,
 )
 SEARCH_WATCH_FINDINGS = _tool(
@@ -558,10 +558,10 @@ def _dispatch(
     try:
         arguments = json.loads(call["arguments"])
     except (KeyError, TypeError, ValueError):
-        return {"error": "Pass a valid JSON object that matches the tool parameters."}
+        return {"error_kind": "invalid_arguments", "error": "Pass a valid JSON object that matches the tool parameters."}
 
     if not isinstance(arguments, dict):
-        return {"error": "Pass a JSON object that matches the tool parameters."}
+        return {"error_kind": "invalid_arguments", "error": "Pass a JSON object that matches the tool parameters."}
 
     name = call.get("name")
     if connected_read is not None:
@@ -718,8 +718,6 @@ def run_assignment(
             tools.append(SEARCH_WATCH_FINDINGS)
         if observe_watch_subject:
             tools.append(OBSERVE_SUBJECT)
-    if change_tracker is not None:
-        tools.append(STAGE_EVIDENCE_CHANGE)
     if project_note_store is not None and stage_project_note is not None:
         tools.extend(NOTE_TOOLS)
         tools.append(READ_CITED)
@@ -896,8 +894,9 @@ def run_assignment(
         # provider request can finish even if Stop arrives before the network send.
         progress("Waiting for the model.")
         delivered = len(history)
+        offered_tools = tools + [STAGE_EVIDENCE_CHANGE] if change_tracker and change_tracker.has_two_lines else tools
         response = model.respond(
-            history, tools, instructions, max_tool_calls=remaining_calls
+            history, offered_tools, instructions, max_tool_calls=remaining_calls
         )
         record({"type": "response", "response": response})
         if time.monotonic() >= deadline:

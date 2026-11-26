@@ -63,6 +63,18 @@ class BulletinModel:
                               "evidence": [], "findings": []}
             else:
                 assessment = self.assess(watch, receipt, outputs.get("mandate"))
+                if watch["request"] == DECISION and assessment["outcome"] == "material":
+                    previous_url = watch["previous"]["evidence"][0]
+                    if "prior_bulletin" not in outputs:
+                        return {"status": "completed", "output": [call(
+                            "prior_bulletin", "read_cited_evidence", source_url=previous_url,
+                            start_line=0, line_count=1,
+                        )]}
+                    previous = outputs["prior_bulletin"]
+                    if previous.get("source_url") != previous_url or "data" not in previous:
+                        raise ValueError("The earlier bulletin snapshot could not be reopened.")
+                    if any(tool.get("name") == "stage_evidence_change" for tool in tools):
+                        raise ValueError("A snapshot-only watch was offered a numbered-line relationship.")
             items = [call("assessment", "stage_watch_assessment", **assessment)]
         return {"status": "completed", "output": items}
 
@@ -160,6 +172,8 @@ class WatchWorkflowTests(unittest.TestCase):
             self.append("published.csv")
             changed, out = self.check(client, decision)
             new_url = changed + out["bulletin"]["evidence_url"].removeprefix("..")
+            self.assertNotIn("P-21", {row["item_id"] for row in out["prior_bulletin"]["data"]["records"]})
+            self.assertIn("P-21", {row["item_id"] for row in out["bulletin"]["data"]["records"]})
             self.check(client, grants)
             homepage = client.get("/").text
             for watch in (decision, grants):
@@ -183,7 +197,11 @@ class WatchWorkflowTests(unittest.TestCase):
             self.assertEqual(home.count("Return approval changed"), 1)
             working = self.bulletin.read_bytes()
             self.bulletin.unlink()
-            self.check(client, grants)
+            _, outage = self.check(client, grants)
+            self.assertEqual(outage["bulletin"]["error_kind"], "source_tool_error")
+            self.assertNotIn("arguments", outage["bulletin"]["error"].lower())
+            self.assertNotIn("evidence_url", outage["bulletin"])
+            self.assertNotIn("data", outage["bulletin"])
             self.assertIn("Bulletin could not be checked.", client.get(grants).text)
             self.bulletin.write_bytes(working)
             self.check(client, grants)

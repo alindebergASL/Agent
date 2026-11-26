@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from tests.quote_fixture import answer, call, tool_outputs
+from work_agent.evidence_changes import AssignmentEvidenceChanges
 from work_agent.storage import InactiveTurn, Store
 from work_agent.web import create_app
 
@@ -42,6 +43,8 @@ class PolicyFixture:
                      call("keep_note", "stage_project_note", scope="Facility access",
                           expected_revision=0, claims=claims, reason="Original handbook rules.")]
         elif request == CHANGE and "old" not in out:
+            if "stage_evidence_change" in {tool.get("name") for tool in tools}:
+                raise AssertionError("Line relationships were offered before the source reads.")
             items = [
                 call("old", "read_prior_artifact", reference_id=user["prior_artifacts"][0]["reference_id"],
                      start_line=2, line_count=1),
@@ -52,6 +55,8 @@ class PolicyFixture:
                      new_source="../uploads/amendment.txt#L2", relationship="qualifies", scope="North", reason="Signed."),
             ]
         elif request == CHANGE and "qualify" not in out:
+            if "stage_evidence_change" not in {tool.get("name") for tool in tools}:
+                raise AssertionError("The numbered amendment and earlier rule should be linkable now.")
             old = out["old"]["revision_url"] + "#L2"
             items = [
                 call("qualify", "stage_evidence_change", earlier_source=old,
@@ -178,6 +183,30 @@ class PolicyChangeTests(unittest.TestCase):
                     store.stage_evidence_change(*args)
                 for name in ("old", "new"):
                     self.assertEqual(len(store.evidence_changes(task, name, None)["changes"]), int(status == "complete"))
+
+    def test_reading_one_line_twice_does_not_offer_a_relationship(self):
+        source = self.store.submit("Revisit the signed rule", {"manual.txt": POLICY})
+        self.store.claim()
+        tracker = AssignmentEvidenceChanges(self.store, source, self.store.get_run(source)["turn_id"])
+        row = {"file_id": "manual.txt", "lines": [{"text": "A signature is required.", "number": 2}]}
+        tracker.annotate("read_file", row)
+        tracker.annotate("read_cited_evidence", {**row, "source_task_id": source,
+                         "source_url": f"/tasks/{source}/uploads/manual.txt"})
+        self.assertFalse(tracker.has_two_lines)
+        url = f"/tasks/{source}/evidence/" + "a" * 32
+        tracker.annotate("read_cited_evidence", {"source_url": url, "data": {"required": False}})
+        self.assertFalse(tracker.has_two_lines)
+        for new_source in (url, url + "#L2"):
+            with self.assertRaisesRegex(ValueError, "Cite their exact URLs directly"):
+                tracker.stage(dict(new_source=new_source, earlier_source="../uploads/manual.txt#L2",
+                                   relationship="qualifies", scope="Ridge", reason="Scope changed."), {})
+        tracker.annotate("read_file", {**row, "lines": [{"text": "Escorts are exempt.", "number": 3}]})
+        self.assertTrue(tracker.has_two_lines)
+        empty, quoted = "../uploads/manual.txt#L1", "../uploads/manual.txt#L2"
+        with self.assertRaisesRegex(ValueError, "containing the passages"):
+            tracker.stage(dict(new_source=empty, earlier_source=quoted, relationship="qualifies",
+                               scope="Ridge", reason="Check the amendment."),
+                          {empty: ("manual.txt", "  "), quoted: ("manual.txt", "Sign here.")})
 
     def test_supersession_is_specific_to_a_published_revision_and_effective_scope(self):
         source = self.store.submit("Publish the approval matrix", {})

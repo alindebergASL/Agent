@@ -57,6 +57,8 @@ Each command appends actual rows to the configured read-only source's backing fi
 
    Expect two notices under **Needs your attention**. One identifies the new exception for unopened returns within seven days and retains the rule for other returns. The other identifies G-203, the applicant fit, and the December 14 deadline. Follow the notices to their source snapshots. The snapshots for the original decision and the changed decision should show what was known at the time of each check.
 
+   Inspect the policy check's run history. A finding can cite the earlier bulletin snapshot alongside the current one. A relationship between numbered file passages requires two distinct lines read from uploads or saved revisions. A snapshot-only comparison should finish without attempting to invent a line number.
+
 3. Recreate the app with the same volume and publish a mirror.
 
    ```bash
@@ -75,5 +77,7 @@ Each command appends actual rows to the configured read-only source's backing fi
    ```
 
 5. To check discovery on a first run, create a new funding watch after publication and ask explicitly for opportunities already open today. Its first check can surface G-203. Stop the practice watches from their detail pages.
+
+For the missing-file check, inspect the bulletin tool result in run history. The expected `error_kind` is `source_tool_error`. It reports a failed read with no evidence URL. The connector can only infer the specific cause when the protocol supplies it. In this exercise, the controlled file move establishes the cause.
 
 Record the commit, observed provider model, what changed, which rule was used, the number of distinct notices per watch, and whether the evidence reopened after restart. Record any discrepancy, including questions, incomplete source coverage, duplicates or missed eligibility. The checked-in offline workflow uses a scripted provider, and its scores should be reported separately from the live run.

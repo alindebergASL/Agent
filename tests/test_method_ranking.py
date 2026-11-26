@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tests.method_policy_eval import evaluate, score
 from tests.quote_fixture import answer, call, tool_outputs
+from work_agent.methods import method_page
 from work_agent.runner import run_assignment
 from work_agent.storage import Store
 
@@ -55,6 +56,8 @@ class MethodRankingTests(unittest.TestCase):
             def respond(inner, history, tools, instructions, *, max_tool_calls):
                 request = json.loads(history[0]["content"])
                 results = tool_outputs(history)
+                self.assertEqual(request["saved_methods"], offers[:3])
+                self.assertEqual(request["next_method_offset"], 3)
                 self.assertNotIn(target, [row["id"] for row in request["saved_methods"]])
                 if "attempt" not in results:
                     output = call("attempt", "read_method", method_id=target)
@@ -78,6 +81,20 @@ class MethodRankingTests(unittest.TestCase):
             PageReader(), "Process inventory", {}, lambda *_: None, lambda *_: None, lambda *_: None,
             method_index=offers, read_method=self.store.get_method,
         ), "Used the appropriate inventory method.")
+
+    def test_short_lists_and_byte_limited_pages_preserve_every_match(self):
+        short = [{"id": n, "title": "Check", "scope": "North"} for n in range(9)]
+        for count in (1, 2, 3):
+            self.assertEqual(method_page(short[:count], 0), {"saved_methods": short[:count]})
+        self.assertEqual(method_page(short, 3), {"saved_methods": short[3:]})
+
+        long_scopes = [{**item, "scope": "📦" * 500} for item in short]
+        offset = 0
+        for item in long_scopes:
+            page = method_page(long_scopes, offset)
+            self.assertEqual(page["saved_methods"], [item])
+            offset += 1
+            self.assertEqual(page.get("next_method_offset"), offset if offset < len(long_scopes) else None)
 
     def test_paired_evaluator_uses_actual_application_outcomes(self):
         for case in ("split", "drill_failed"):

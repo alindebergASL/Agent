@@ -11,8 +11,9 @@ from urllib.parse import urlsplit
 import anyio
 import httpx2
 from anyio.from_thread import start_blocking_portal
-from mcp import Client
+from mcp import Client, MCPError
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CONNECTION_CLOSED, INVALID_PARAMS, REQUEST_TIMEOUT
 
 READ_TIMEOUT = 10
 MAX_WIRE_BYTES = 512 * 1024
@@ -83,6 +84,9 @@ class ConnectedSources:
                         client, definitions, token = remote.__enter__()
                         # Closing an unavailable peer cannot override this assignment’s outcome.
                         stack.callback(_close_source, remote)
+                    except MissingSourceCredential:
+                        catalog.warnings.append(f"Source {source.name} is unavailable because its configured credential is missing.")
+                        continue
                     except Exception:
                         catalog.warnings.append(f"Source {source.name} is unavailable.")
                         continue
@@ -142,16 +146,21 @@ def _output_schema(data_schema):
         "properties": {
             "source": {"type": "string"}, "tool": {"type": "string"},
             "data": data_schema, "evidence_url": {"type": "string"}, "error": {"type": "string"},
+            "error_kind": {"type": "string"},
         },
         "anyOf": [{"required": ["source", "tool", "data"]}, {"required": ["error"]}],
     }
 
 
+class MissingSourceCredential(ValueError):
+    pass
+
+
 @asynccontextmanager
 async def _open_source(source):
-    token = os.environ[source.token_env] if source.token_env else None
+    token = os.environ.get(source.token_env) if source.token_env else None
     if source.token_env and not token:
-        raise ValueError("Source credential is unavailable.")
+        raise MissingSourceCredential()
     headers = {"Accept-Encoding": "identity"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -203,6 +212,12 @@ def _contains_token(value, token):
     return bool(token and token in json.dumps(value, ensure_ascii=False))
 
 
+def _read_error(kind, message):
+    # Remote diagnostics can contain credentials, filesystem paths or instructions.
+    # Publish only local messages and MCP's machine-readable status.
+    return {"error_kind": kind, "error": message}
+
+
 class SourceCatalog:
     def __init__(self):
         self.tools = []
@@ -210,25 +225,39 @@ class SourceCatalog:
         self.calls = {}
 
     def call(self, name, arguments):
-        if name not in self.calls or not isinstance(arguments, dict):
-            return {"error": "Choose a connected tool and pass its arguments as an object."}
+        if name not in self.calls:
+            return _read_error("tool_unavailable", "Choose an available connected tool.")
+        if not isinstance(arguments, dict):
+            return _read_error("invalid_arguments", "Pass connected tool arguments as a JSON object.")
         portal, client, source, tool, token = self.calls[name]
         try:
             result = portal.call(_read_result, client, tool, arguments)
             if result.is_error:
-                return {"error": f"{name} rejected this request. Check the tool arguments."}
+                return _read_error("source_tool_error", f"{name} reported a tool failure. This read supplied no verified data.")
             data = result.structured_content
             if data is None:
                 if any(block.type != "text" for block in result.content):
-                    return {"error": f"{name} returned unsupported content. Request text or structured data."}
+                    return _read_error("unsupported_content", f"{name} returned unsupported content. Request text or structured data.")
                 texts = [block.text for block in result.content]
                 data = texts[0] if len(texts) == 1 else texts
             if _contains_token(data, token):
-                return {"error": f"{name} returned a credential and its result was withheld."}
+                return _read_error("result_withheld", f"{name} returned a credential and its result was withheld.")
             if _json_size(data) > MAX_RESULT_BYTES:
-                return {"error": f"{name} returned too much data. Request a smaller page or narrower fields."}
+                return _read_error("result_too_large", f"{name} returned too much data. Request a smaller page or narrower fields.")
+        except MCPError as exc:
+            if exc.code == INVALID_PARAMS:
+                return _read_error("invalid_arguments", f"{name} reported invalid parameters. Check its input schema.")
+            if exc.code == REQUEST_TIMEOUT:
+                return _read_error("timeout", f"{name} timed out before the read completed.")
+            if exc.code == CONNECTION_CLOSED:
+                return _read_error("transport_error", f"The connection to {name} closed before the read completed.")
+            return _read_error("protocol_error", f"{name} reported an MCP protocol error.")
+        except (TimeoutError, httpx2.TimeoutException):
+            return _read_error("timeout", f"{name} timed out before the read completed.")
+        except httpx2.TransportError:
+            return _read_error("transport_error", f"The connection to {name} failed before the read completed.")
         except Exception:
-            return {"error": f"{name} could not complete the read."}
+            return _read_error("read_failed", f"{name} could not complete the read.")
         return {"source": source, "tool": tool, "data": data}
 
 

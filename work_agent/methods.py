@@ -45,8 +45,8 @@ def ranked_methods(connection: sqlite3.Connection, query: str) -> list[dict]:
     """, (expression,))]
 
 
-def method_page(methods: list[dict], offset: int) -> dict:
-    # Bound the context cost of one page in bytes, independent of the number of methods.
+def method_page(methods: list[dict], offset: int, *, initial_limit: int | None = 3) -> dict:
+    # The initial preview is automatic. An explicit request for more gets a full page.
     if type(offset) is not int or not 0 <= offset < len(methods):
         raise ValueError("Choose an offset returned by the method index.")
     selected = []
@@ -54,7 +54,7 @@ def method_page(methods: list[dict], offset: int) -> dict:
     for index in range(offset, len(methods)):
         item = methods[index]
         size += len(json.dumps(item).encode("utf-8")) + 2
-        if selected and size > 8192:
+        if selected and (size > 8192 or (offset == 0 and len(selected) == initial_limit)):
             return {"saved_methods": selected, "next_method_offset": index}
         selected.append(item)
     return {"saved_methods": selected}
