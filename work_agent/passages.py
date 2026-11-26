@@ -101,7 +101,8 @@ def refresh(db, upload_bytes, *, file_id=None):
             else:
                 entry = db.execute("SELECT position,content FROM uploads WHERE task_id=? AND name=?", (task, name)).fetchone()
                 try:
-                    segments = chunks(name, upload_bytes(task, entry))
+                    office = db.execute("SELECT text FROM office_upload_text WHERE task_id=? AND name=?", (task,name)).fetchone()
+                    segments = chunks(name, office[0].encode() if office else upload_bytes(task, entry))
                 except FileNotFoundError:
                     # Legacy volumes may have lost the old positional file. Retry when restored.
                     continue

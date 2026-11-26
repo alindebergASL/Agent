@@ -81,7 +81,7 @@ def read_link(arguments, disclosed, store, current_task_id, pin_source, read_pag
             text, layout = projection
             content = text.encode("utf-8")
         else:
-            content = store.read_upload(task_id, name)
+            content = store.read_upload_text(task_id, name)
         if pdf_page and not any(p["number"] == int(pdf_page) and anchor and
                                 p["start_line"] <= int(anchor) <= p["end_line"] for p in layout):
             raise ValueError("The cited PDF page does not contain this source line.")

@@ -45,6 +45,10 @@ def calculate_with_evidence(expression, inputs, receipts, calculate, conditions=
         filename, line = receipts[url]
         # CSV delimiters can look like thousands separators. Parse columns before matching.
         cells = next(csv.reader([line]), []) if filename.lower().endswith(".csv") else [line]
+        if filename.lower().endswith((".xlsx", ".docx")) and "\t" in line:
+            fields = line.split("\t", 2)
+            if len(fields) == 3:
+                cells = [fields[2]] if fields[1] in ("number", "text") else []
         value = Decimal(literal)
         if not any(value in numeric_values(cell) for cell in cells):
             raise ValueError(f"The cited line does not contain the value given for {name}.")

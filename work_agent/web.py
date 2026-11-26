@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .pdf_documents import MAX_PDF_BYTES, PdfError, is_pdf, render_page
+from . import office_documents
 from .note_pages import install_note_pages
 from .watch_pages import install_watch_pages
 from .artifact_preview import is_upload_name, markdown_preview
@@ -176,17 +177,20 @@ async def read_form_uploads(form: FormData) -> dict[str, bytes]:
             raise ValueError("Use a plain filename of up to 120 characters.")
         if name in uploads:
             raise ValueError("Each upload must have a different filename.")
+        if name.lower().endswith(".doc"):
+            raise ValueError("For legacy Word documents, save a .docx copy or export a searchable PDF.")
         prefix = await file.read(1024)
         pdf = is_pdf(prefix)
-        limit = MAX_PDF_BYTES if pdf else MAX_FILE_BYTES
+        office = office_documents.kind(name)
+        limit = MAX_PDF_BYTES if pdf or office else MAX_FILE_BYTES
         if name.lower().endswith(".pdf") and not pdf:
             raise ValueError(f"{name} has no PDF file header.")
         data = prefix + await file.read(limit - len(prefix) + 1)
         if len(data) > limit:
-            raise ValueError("Each PDF must be 16 MiB or smaller." if pdf else "Each text file must be 128 KiB or smaller.")
+            raise ValueError("PDF and Office files must be 16 MiB or smaller." if pdf or office else "Each text file must be 128 KiB or smaller.")
         if len(data) + sum(map(len, uploads.values())) > MAX_UPLOAD_TOTAL:
             raise ValueError("Upload at most 32 MiB of files in one request.")
-        if not pdf:
+        if not pdf and not office:
             try:
                 data.decode("utf-8")
             except UnicodeDecodeError:
@@ -723,7 +727,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
                 raise HTTPException(404, "Uploaded file not found.")
             return Response(
                 content,
-                media_type="application/pdf" if is_pdf(content) else "text/plain",
+                media_type="application/pdf" if is_pdf(content) else office_documents.FORMATS.get(office_documents.kind(name), "text/plain"),
                 headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
                          "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"},
             )
@@ -732,7 +736,7 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
             raise HTTPException(404, "PDF page not found.")
         lines = []
         if not pages:
-            content = store.read_upload(task_id, name)
+            content = store.read_upload_text(task_id, name)
             if content is None:
                 raise HTTPException(404, "Uploaded file not found.")
             lines = content.decode("utf-8").splitlines()
