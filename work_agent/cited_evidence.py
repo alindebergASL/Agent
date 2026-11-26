@@ -17,11 +17,18 @@ def line_source_urls(tool, result):
     return []
 
 
+def line_suffix(line):
+    page = f"?page={line['page']}" if "page" in line else ""
+    return f"{page}#L{line['number']}"
+
+
 def remember_lines(receipts, tool, result):
     if result.get("lines"):
         for url in line_source_urls(tool, result):
             for line in result["lines"]:
-                receipts[f"{url}#L{line['number']}"] = (result["file_id"], line["text"])
+                if line.get("has_text") is False:
+                    continue
+                receipts[url + line_suffix(line)] = (result["file_id"], line["text"])
 
 
 def disclosed_sources(tool, result):
@@ -55,8 +62,8 @@ def read_link(arguments, disclosed, store, current_task_id, pin_source, read_pag
     match = LOCAL_SOURCE.fullmatch(url)
     if not match:
         raise ValueError("This link does not identify an immutable workspace source.")
-    task_id, kind, encoded, revision, anchor = match.groups()
-    base = url.partition("#")[0]
+    task_id, kind, encoded, revision, pdf_page, anchor = match.groups()
+    base = url.partition("#")[0].partition("?page=")[0]
     name = unquote(encoded)
     if kind == "evidence":
         snapshot = store.source_evidence(task_id, name)
@@ -67,16 +74,27 @@ def read_link(arguments, disclosed, store, current_task_id, pin_source, read_pag
     if kind == "artifacts" and revision is None:
         raise ValueError("A generated file link must specify its exact revision.")
     rev = int(revision) if revision else None
+    layout = []
     if kind == "uploads":
-        content = store.read_upload(task_id, name)
+        projection = store.read_upload_projection(task_id, name)
+        if projection is not None:
+            text, layout = projection
+            content = text.encode("utf-8")
+        else:
+            content = store.read_upload(task_id, name)
+        if pdf_page and not any(p["number"] == int(pdf_page) and anchor and
+                                p["start_line"] <= int(anchor) <= p["end_line"] for p in layout):
+            raise ValueError("The cited PDF page does not contain this source line.")
     else:
         artifact = store.artifact_revision(task_id, name, rev)
         content = artifact["content"] if artifact else None
     start = arguments["start_line"]
     if type(start) is int and start == 0:
         start = int(anchor or 1)
-    page = read_page(name, {"source_task_id": task_id, "source_url": base, "revision": rev},
-                     content, start, arguments["line_count"])
+    metadata = {"source_task_id": task_id, "source_url": base, "revision": rev}
+    if layout:
+        metadata["pdf_pages"] = layout
+    page = read_page(name, metadata, content, start, arguments["line_count"])
     if current_task_id and task_id != current_task_id and pin_source is not None:
         ref = pin_source(task_id, name, rev)
         page.update(reference_id=ref["reference_id"], revision_url=f"../prior-artifacts/{ref['reference_id']}")

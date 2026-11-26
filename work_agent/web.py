@@ -19,6 +19,7 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .pdf_documents import MAX_PDF_BYTES, PdfError, is_pdf, render_page
 from .note_pages import install_note_pages
 from .watch_pages import install_watch_pages
 from .artifact_preview import is_upload_name, markdown_preview
@@ -35,8 +36,10 @@ from .storage import (
 APP_DIR = Path(__file__).parent
 MAX_FILE_BYTES = 128 * 1024
 MAX_REQUEST_CHARS = 8_000
-MAX_FORM_BYTES = (MAX_FILES + 1) * MAX_FILE_BYTES
+MAX_UPLOAD_TOTAL = 2 * MAX_PDF_BYTES
+MAX_FORM_BYTES = MAX_UPLOAD_TOTAL + 128 * 1024
 MAX_RECORD_NUMBER = 2**63 - 1
+PDF_OVERVIEW_LINES = 1000
 MethodId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 ScheduleId = Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]
 logger = logging.getLogger(__name__)
@@ -101,7 +104,9 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         find_evidence_uses=lambda source, offset=0: store.find_evidence_uses(
                             task_id, source, offset
                         ),
-                        read_prior_artifact=lambda reference_id: store.read_prior_artifact(task_id, reference_id),
+                        read_prior_artifact=lambda reference_id: store.read_prior_text(task_id, reference_id),
+                        pdf_layouts=store.pdf_layouts(task_id),
+                        search_pdf_pages=store.search_pdf_pages,
                         search_saved_work=lambda query, kind="any", paraphrases=(): store.search_saved_work(
                             task_id, query, kind, paraphrases
                         ),
@@ -171,15 +176,23 @@ async def read_form_uploads(form: FormData) -> dict[str, bytes]:
             raise ValueError("Use a plain filename of up to 120 characters.")
         if name in uploads:
             raise ValueError("Each upload must have a different filename.")
-        data = await file.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            raise ValueError("Each upload must be 128 KiB or smaller.")
-        try:
-            data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.") from None
-        if b"\x00" in data:
-            raise ValueError("Upload UTF-8 text files, such as CSV or Markdown.")
+        prefix = await file.read(1024)
+        pdf = is_pdf(prefix)
+        limit = MAX_PDF_BYTES if pdf else MAX_FILE_BYTES
+        if name.lower().endswith(".pdf") and not pdf:
+            raise ValueError(f"{name} has no PDF file header.")
+        data = prefix + await file.read(limit - len(prefix) + 1)
+        if len(data) > limit:
+            raise ValueError("Each PDF must be 16 MiB or smaller." if pdf else "Each text file must be 128 KiB or smaller.")
+        if len(data) + sum(map(len, uploads.values())) > MAX_UPLOAD_TOTAL:
+            raise ValueError("Upload at most 32 MiB of files in one request.")
+        if not pdf:
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError("Upload PDFs or UTF-8 text files, such as CSV or Markdown.") from None
+            if b"\x00" in data:
+                raise ValueError("Upload PDFs or UTF-8 text files, such as CSV or Markdown.")
         uploads[name] = data
     return uploads
 
@@ -230,6 +243,9 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "testserver"])
     app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=APP_DIR / "templates")
+    templates.env.filters["assignment_markdown"] = lambda content, task_id: markdown_preview.render(
+        content, {"assignment_url": f"/tasks/{task_id}"}
+    )
     install_note_pages(app, store, templates, check_form_origin, check_form_size)
     install_watch_pages(app, store, templates, check_form_origin, check_form_size, wake, clock, model is not None)
 
@@ -446,6 +462,8 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
                 await asyncio.to_thread(store.follow_up, task_id, prompt, uploads)
         except KeyError:
             raise HTTPException(404, "Assignment not found.") from None
+        except PdfError as exc:
+            return render_assignment(request, task_id, draft=draft, reply_to=expected, error=str(exc), status_code=400)
         except (ValueError, InactiveTurn) as exc:
             return render_assignment(request, task_id, draft=draft, reply_to=expected, error=str(exc), status_code=409)
         wake.set()
@@ -647,13 +665,14 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         return RedirectResponse(request.url_for("methods"), status_code=303)
 
     @app.get("/tasks/{task_id}/prior-artifacts/{reference_id}")
-    def prior_artifact(request: Request, task_id: str, reference_id: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
+    def prior_artifact(request: Request, task_id: str, reference_id: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)],
+                       page: Annotated[int | None, Query(ge=1, le=MAX_RECORD_NUMBER)] = None):
         prior = store.prior_artifact(task_id, reference_id)
         if prior is None:
             raise HTTPException(404, "Earlier file not found.")
         if prior.get("kind") == "upload":
             url = request.url_for("uploaded_source", task_id=prior["source_task_id"], name=quote(prior["name"], safe=""))
-            return RedirectResponse(url, status_code=303)
+            return RedirectResponse(url.include_query_params(page=page) if page else url, status_code=303)
         url = request.url_for("artifact", task_id=prior["source_task_id"], name=prior["name"])
         # Relative citations in the earlier report resolve within its original assignment.
         return RedirectResponse(url.include_query_params(revision=prior["revision"]), status_code=303)
@@ -683,21 +702,44 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
                      **store.evidence_uses(task_id, name, revision, offset)},
         )
 
+    @app.get("/tasks/{task_id}/uploads/{name}/pages/{page}.png")
+    def pdf_page_image(task_id: str, name: str, page: Annotated[int, RoutePath(ge=1, le=MAX_RECORD_NUMBER)]):
+        if page > len(store.pdf_layouts(task_id).get(name, [])):
+            raise HTTPException(404, "PDF page not found.")
+        try:
+            image = render_page(store.read_upload(task_id, name), page)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return Response(image, media_type="image/png", headers={
+            "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=86400",
+        })
+
     @app.get("/tasks/{task_id}/uploads/{name}")
-    def uploaded_source(request: Request, task_id: str, name: str, download: bool = False):
-        content = store.read_upload(task_id, name)
-        if content is None:
-            raise HTTPException(404, "Uploaded file not found.")
+    def uploaded_source(request: Request, task_id: str, name: str, download: bool = False,
+                        page: Annotated[int | None, Query(ge=1, le=MAX_RECORD_NUMBER)] = None):
         if download:
+            content = store.read_upload(task_id, name)
+            if content is None:
+                raise HTTPException(404, "Uploaded file not found.")
             return Response(
                 content,
-                media_type="text/plain",
-                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}"},
+                media_type="application/pdf" if is_pdf(content) else "text/plain",
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
+                         "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"},
             )
+        pages, page_lines = store.read_pdf_view(task_id, name, page, PDF_OVERVIEW_LINES)
+        if page and page > len(pages):
+            raise HTTPException(404, "PDF page not found.")
+        lines = []
+        if not pages:
+            content = store.read_upload(task_id, name)
+            if content is None:
+                raise HTTPException(404, "Uploaded file not found.")
+            lines = content.decode("utf-8").splitlines()
         return templates.TemplateResponse(
-            request=request,
-            name="upload.html",
-            context={"task_id": task_id, "name": name, "lines": content.decode("utf-8").splitlines()},
+            request=request, name="upload.html",
+            context={"task_id": task_id, "name": name, "lines": lines, "pages": pages, "page_lines": page_lines,
+                     "selected_page": page, "display_pages": pages[page - 1:page] if page else pages},
         )
 
     def render_artifact(request, task_id, name, saved, *, historical=False, draft=None, error=None, status_code=200):

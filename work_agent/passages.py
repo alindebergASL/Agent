@@ -78,22 +78,40 @@ def initialize(db):
             SELECT task_id, '{kind}', name, {current_revision} FROM {table} GROUP BY task_id,name""")
 
 
-def refresh(db, upload_bytes):
-    for source in db.execute("SELECT * FROM passage_files WHERE dirty = 1 ORDER BY id").fetchall():
+def _page_chunks(pages):
+    for page in pages:
+        for first, last, _, body in chunks("", page["text"].encode("utf-8")):
+            offset = page["start_line"] - 1
+            yield offset + first, offset + last, f"Page {page['number']}", body
+
+
+def refresh(db, upload_bytes, *, file_id=None):
+    sql = "SELECT * FROM passage_files WHERE dirty=1"
+    args = ()
+    if file_id is not None:
+        sql += " AND id=?"
+        args = (file_id,)
+    for source in db.execute(sql + " ORDER BY id", args).fetchall():
         task, name, file_id = source["task_id"], source["name"], source["id"]
         if source["kind"] == "upload":
-            entry = db.execute("SELECT position,content FROM uploads WHERE task_id=? AND name=?", (task, name)).fetchone()
-            try:
-                content = upload_bytes(task, entry)
-            except FileNotFoundError:
-                # Legacy volumes may have lost the old positional file. Retry when restored.
-                continue
+            pages = db.execute("""SELECT number,start_line,text FROM pdf_upload_pages
+                WHERE task_id=? AND name=? ORDER BY number""", (task, name)).fetchall()
+            if pages:
+                segments = _page_chunks(pages)
+            else:
+                entry = db.execute("SELECT position,content FROM uploads WHERE task_id=? AND name=?", (task, name)).fetchone()
+                try:
+                    segments = chunks(name, upload_bytes(task, entry))
+                except FileNotFoundError:
+                    # Legacy volumes may have lost the old positional file. Retry when restored.
+                    continue
         else:
             content = db.execute("SELECT content FROM artifact_revisions WHERE task_id=? AND name=? AND revision=?",
                                  (task, name, source["revision"])).fetchone()[0]
+            segments = chunks(name, content)
         db.execute("DELETE FROM source_passages WHERE rowid IN (SELECT passage_id FROM file_passage_rows WHERE file_id=?)", (file_id,))
         db.execute("DELETE FROM file_passage_rows WHERE file_id=?", (file_id,))
-        for first, last, section, body in chunks(name, content):
+        for first, last, section, body in segments:
             entry = db.execute("INSERT INTO source_passages(file_id,first_line,last_line,section,body) VALUES(?,?,?,?,?)",
                                (file_id, first, last, section, body))
             db.execute("INSERT INTO file_passage_rows(file_id,passage_id) VALUES(?,?)", (file_id, entry.lastrowid))
@@ -120,6 +138,8 @@ def _matches(db, task, kind, expression, limit):
         )
         SELECT f.task_id AS source_task_id, f.name, f.revision, f.kind,
                t.created_at, substr(t.request, 1, 240) AS request,
+               (SELECT number FROM pdf_upload_pages WHERE f.kind='upload' AND task_id=f.task_id AND name=f.name
+                AND p.first_line BETWEEN start_line AND end_line) AS page,
                p.first_line, p.last_line, p.section, snippet(source_passages, 4, char(2), char(3), ' … ', 38) AS marked_excerpt
         FROM best JOIN source_passages AS p ON p.rowid=best.passage_id
         JOIN passage_files AS f ON f.id=best.file_id JOIN tasks AS t ON t.id=f.task_id
@@ -136,6 +156,22 @@ def _excerpt(row):
     start = max(0, center - PREVIEW_CHARS // 3)
     excerpt = marked[start:].replace("\x02", "").replace("\x03", "")
     return ("… " if start else "") + excerpt[:PREVIEW_CHARS]
+
+
+def search_pdf(db, file_id, terms, offset):
+    # Page order stays stable for this immutable source as unrelated files are indexed.
+    rows = db.execute("""WITH hits AS MATERIALIZED (
+            SELECT first_line,last_line,snippet(source_passages,4,char(2),char(3),' … ',38) AS marked_excerpt
+            FROM source_passages WHERE file_id=? AND source_passages MATCH ?
+            ORDER BY first_line,rowid LIMIT 9 OFFSET ?
+        )
+        SELECT pg.number,h.first_line,h.last_line,h.marked_excerpt FROM hits h
+        JOIN passage_files f ON f.id=? JOIN pdf_upload_pages pg ON (pg.task_id,pg.name)=(f.task_id,f.name)
+            AND h.first_line BETWEEN pg.start_line AND pg.end_line
+        ORDER BY h.first_line""", (file_id, "body:(" + match_expression(terms) + ")", offset, file_id)).fetchall()
+    matches = [{"page": row["number"], "start_line": row["first_line"], "end_line": row["last_line"],
+                "text": _excerpt(row)} for row in rows[:8]]
+    return {"matches": matches, "next_offset": offset + 8 if len(rows) > 8 else None}
 
 
 def _context(text, excluded):
@@ -167,6 +203,8 @@ def search(db, task, kind, terms, metadata, query, paraphrases):
                     "start_line": row["first_line"], "end_line": row["last_line"], "context": row["section"],
                     "text": _excerpt(row), "match": channel,
                 }
+                if row["page"] is not None:
+                    passages[key]["page"] = row["page"]
 
     add(metadata, 1.0, None)
     direct = _matches(db, task, kind, match_expression(terms), 96)

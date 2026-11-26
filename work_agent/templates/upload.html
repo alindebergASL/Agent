@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ name }} · Work Agent{% endblock %}
+{% block head %}
+{% if pages and not page_lines %}<script src="{{ url_for('static', path='pdf-page-index.js') }}" defer></script>{% endif %}
+{% endblock %}
 {% block body %}
 <a class="back" href="{{ url_for('assignment', task_id=task_id) }}">← Assignment</a>
 <section class="panel">
@@ -9,6 +12,42 @@
   </div>
   <p><a href="{{ url_for('new_from_upload', task_id=task_id, name=name|urlencode) }}">Start an assignment with this original</a></p>
   <p><a href="{{ url_for('evidence_uses', task_id=task_id, kind='upload', name=name|urlencode) }}">Where this original was used</a></p>
-  {% include "source_lines.html" %}
+  {% if pages and not page_lines %}
+    <nav aria-label="PDF page index">
+      <h2>{{ pages|length }} pages</h2>
+      <ol class="pdf-page-index">
+        {% for page in pages %}
+        <li id="page-{{ page.number }}"><a data-first-line="{{ page.start_line }}" data-last-line="{{ page.end_line }}" href="?page={{ page.number }}">Page {{ page.number }} · {% if page.has_text %}lines {{ page.start_line }}–{{ page.end_line }}{% else %}no extractable text{% endif %}</a></li>
+        {% endfor %}
+      </ol>
+    </nav>
+  {% elif pages %}
+    {% if selected_page %}
+    <nav aria-label="PDF pages">
+      {% if selected_page > 1 %}<a href="?page={{ selected_page - 1 }}">Previous page</a> · {% endif %}
+      <a href="?">All pages</a>
+      {% if selected_page < pages|length %} · <a href="?page={{ selected_page + 1 }}">Next page</a>{% endif %}
+    </nav>
+    {% endif %}
+    {% for page in display_pages %}
+    <section aria-labelledby="page-{{ page.number }}">
+      <h2 id="page-{{ page.number }}">Page {{ page.number }} of {{ pages|length }}</h2>
+      {% if selected_page %}
+      <img class="pdf-page" src="{{ url_for('pdf_page_image', task_id=task_id, name=name|urlencode, page=page.number) }}" alt="Original PDF page {{ page.number }}">
+      {% else %}
+      <a href="?page={{ page.number }}">View original page {{ page.number }}</a>
+      {% endif %}
+      {% if page.has_text %}
+        {% with lines=page_lines[page.number], first_line=page.start_line, line_query='?page=' ~ page.number %}
+        {% include "source_lines.html" %}
+        {% endwith %}
+      {% else %}
+        <p id="L{{ page.start_line }}">No extractable text on this page.</p>
+      {% endif %}
+    </section>
+    {% endfor %}
+  {% else %}
+    {% include "source_lines.html" %}
+  {% endif %}
 </section>
 {% endblock %}

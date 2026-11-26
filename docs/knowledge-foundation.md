@@ -8,13 +8,13 @@ Suppose a handbook requires manager approval at two labs. An approved addendum e
 
 | Workspace object | How it is used |
 | --- | --- |
-| Original upload or published artifact revision | Preserve its bytes and identity. Search across full supported text, including CSV rows and Markdown sections. Open a numbered passage before using it as evidence. |
+| Original upload or published artifact revision | Preserve its bytes and identity. Search across full supported text, including PDF pages, CSV rows and Markdown sections. Open a numbered passage before using it as evidence. |
 | Evidence relationship | Link two exact source lines. Record whether one supersedes, qualifies or contradicts the other, where the relationship applies and why. A later timestamp on its own is insufficient evidence of replacement. |
 | Decision or project note | Store claims with their source links. Each published revision can explain what changed and link a replacement claim to its predecessor. Historical revisions and user edits remain inspectable. |
 | Citation index | Find report revisions or note claims that depended on a source. Follow a report that another decision cited. A file that was only selected or read has its own entry. A citation identifies work to reconsider. The agent must still determine whether the outcome changes. |
 | Reusable method | Retrieve procedures by title and scope for the assignment. The agent can inspect the procedure and compare it against the current inputs. |
 
-The Compose app and its durable data have separate lifetimes. Source bytes, published revisions, notes, relationship records and the derived SQLite indexes share the existing named data volume. Replacing the application container reuses that volume. Searching runs locally. Selected passages, claims, tool outputs, and the user's assignment enter the configured model's context. Search covers original text uploads and the latest published CSV or Markdown of each name and assignment. Earlier generated revisions stay directly readable through their citations and history.
+The Compose app and its durable data have separate lifetimes. Source bytes, published revisions, notes, relationship records and the derived SQLite indexes share the existing named data volume. Replacing the application container reuses that volume. Searching runs locally. Selected passages, claims, tool outputs, and the user's assignment enter the configured model's context. Search covers the extracted pages of original PDFs, original text uploads and the latest published CSV or Markdown of each name and assignment. Earlier generated revisions stay directly readable through their citations and history.
 
 ## What the agent sees before acting
 

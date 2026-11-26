@@ -121,14 +121,18 @@ class EvidenceChangeStore:
         last_line = end_line if end_line is not None else 2**63 - 1
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT c.new_doc||'#L'||c.new_line AS new_source,
+                """WITH bases(doc) AS (
+                       SELECT ? UNION ALL SELECT ?||'?page='||number FROM pdf_upload_pages
+                       WHERE task_id=? AND name=? AND ? IS NULL AND start_line<=? AND end_line>=?)
+                   SELECT c.new_doc||'#L'||c.new_line AS new_source,
                           c.earlier_doc||'#L'||c.earlier_line AS earlier_source,
                           c.relationship,c.scope,c.reason,'/tasks/'||t.task_id AS assignment_url
                    FROM evidence_changes c JOIN turns t ON t.id=c.turn_id
-                   WHERE c.published=1 AND ((c.new_doc=? AND c.new_line BETWEEN ? AND ?)
-                      OR (c.earlier_doc=? AND c.earlier_line BETWEEN ? AND ?))
+                   WHERE c.published=1 AND ((c.new_doc IN (SELECT doc FROM bases) AND c.new_line BETWEEN ? AND ?)
+                      OR (c.earlier_doc IN (SELECT doc FROM bases) AND c.earlier_line BETWEEN ? AND ?))
                    ORDER BY c.id DESC LIMIT ? OFFSET ?""",
-                (source, start_line, last_line, source, start_line, last_line, PAGE_SIZE + 1, offset),
+                (source, source, source_task_id, name, revision, last_line, start_line,
+                 start_line, last_line, start_line, last_line, PAGE_SIZE + 1, offset),
             ).fetchall()
         return {"changes": [dict(row) for row in rows[:PAGE_SIZE]],
                 "next_offset": offset + PAGE_SIZE if len(rows) > PAGE_SIZE else None}

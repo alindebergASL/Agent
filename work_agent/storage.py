@@ -10,7 +10,7 @@ from pathlib import Path
 from .methods import initialize_method_search, ranked_methods
 from . import memory_context, project_notes
 from . import evidence_changes, evidence_links
-from . import passages, watch_history, watch_subjects, watches
+from . import passages, pdf_documents, watch_history, watch_subjects, watches
 from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
 
 
@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS uploads (
     PRIMARY KEY (task_id, position),
     UNIQUE (task_id, name)
 );
+CREATE TABLE IF NOT EXISTS pdf_upload_pages (
+    task_id TEXT NOT NULL, name TEXT NOT NULL,
+    number INTEGER NOT NULL CHECK(number > 0),
+    start_line INTEGER NOT NULL CHECK(start_line > 0), end_line INTEGER NOT NULL CHECK(end_line >= start_line),
+    text TEXT NOT NULL,
+    PRIMARY KEY(task_id, name, number),
+    FOREIGN KEY(task_id, name) REFERENCES uploads(task_id, name)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS turns_task ON turns(task_id, id);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY,
@@ -355,11 +363,12 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         self, request: str, uploads: dict[str, bytes], *, prior_revision: tuple[str, str, int | None] | None = None
     ) -> str:
         task_id = uuid.uuid4().hex
+        sources = self._prepare_uploads(uploads)
         with self._connection() as connection:
             turn_id = self._insert_task(connection, task_id, request)
             if prior_revision is not None:
                 self._pin_saved_work(connection, task_id, *prior_revision)
-            self._add_uploads(connection, task_id, turn_id, uploads)
+            self._add_uploads(connection, task_id, turn_id, sources)
         return task_id
 
     def _insert_task(self, connection: sqlite3.Connection, task_id: str, request: str) -> int:
@@ -477,7 +486,13 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             rows = connection.execute(query + " ORDER BY pin.reference_id", (task_id,))
         else:
             rows = connection.execute(query + " AND pin.reference_id = ?", (task_id, reference_id))
-        return [dict(row) for row in rows]
+        references = [dict(row) for row in rows]
+        for source in references:
+            if source["kind"] == "upload":
+                layout = self._pdf_layout(connection, source["source_task_id"], source["name"])
+                if layout:
+                    source["pdf_pages"] = layout
+        return references
 
     def prior_artifact(self, task_id: str, reference_id: int) -> dict | None:
         if type(reference_id) is not int or not 0 < reference_id <= 2**63 - 1:
@@ -536,6 +551,25 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             )
             return list(passages.search(connection, task_id, kind, terms, rows, query, paraphrases))
 
+    def search_pdf_pages(self, task_id, name, query, offset=0):
+        if not isinstance(query, str) or len(query) > 200 or not (terms := passages.WORDS.findall(query)):
+            raise ValueError("Search with up to 200 characters of keywords.")
+        if type(offset) is not int or not 0 <= offset < 2**63:
+            raise ValueError("Supply a nonnegative search offset.")
+        with self._connection() as db:
+            db.execute("BEGIN")
+            source = db.execute("""SELECT id,dirty FROM passage_files f
+                WHERE (task_id,name,kind)=(?,?,'upload') AND EXISTS (
+                    SELECT 1 FROM pdf_upload_pages p WHERE p.task_id=f.task_id AND p.name=f.name)
+                """, (task_id, name)).fetchone()
+            if source is None:
+                raise ValueError("Choose a current or pinned PDF upload.")
+            if source["dirty"]:
+                db.rollback()
+                db.execute("BEGIN IMMEDIATE")
+                passages.refresh(db, self._upload_bytes, file_id=source["id"])
+            return passages.search_pdf(db, source["id"], terms, offset)
+
     def _pin_saved_work(self, connection, task_id: str, source_task_id: str, name: str, revision: int | None) -> dict:
         if not isinstance(source_task_id, str) or task_id == source_task_id or not isinstance(name, str):
             raise ValueError("Choose a file from another assignment.")
@@ -567,11 +601,17 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             return self._pin_saved_work(connection, task_id, source_task_id, name, revision)
 
     def read_prior_artifact(self, task_id: str, reference_id: int) -> bytes | None:
+        return self._read_prior(task_id, reference_id, self.read_upload)
+
+    def read_prior_text(self, task_id: str, reference_id: int) -> bytes | None:
+        return self._read_prior(task_id, reference_id, self.read_upload_text)
+
+    def _read_prior(self, task_id, reference_id, read_upload):
         pin = self.prior_artifact(task_id, reference_id)
         if pin is None:
             return None
         if pin["kind"] == "upload":
-            return self.read_upload(pin["source_task_id"], pin["name"])
+            return read_upload(pin["source_task_id"], pin["name"])
         saved = self.artifact_revision(pin["source_task_id"], pin["name"], pin["revision"])
         return saved["content"] if saved else None
 
@@ -706,6 +746,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         request = request.strip()
         if not request:
             raise ValueError("Enter a follow-up request.")
+        sources = self._prepare_uploads(uploads)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -713,7 +754,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                 raise KeyError(task_id)
             if not self._can_follow_up(connection, task_id, row["status"]):
                 raise ValueError("This assignment is not ready for a follow-up.")
-            return self._queue_turn(connection, task_id, request, "follow-up", uploads)
+            return self._queue_turn(connection, task_id, request, "follow-up", sources)
 
     def wait_for_input(self, task_id: str, question: str, *, turn_id: int) -> None:
         question = question.strip()
@@ -732,22 +773,23 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         request = request.strip()
         if not request:
             raise ValueError("Enter an answer.")
+        sources = self._prepare_uploads(uploads)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             turn = self._expected_turn(connection, task_id, expected_turn_id)
             if turn["status"] != "waiting":
                 raise ValueError("This assignment is no longer waiting for an answer.")
-            return self._queue_turn(connection, task_id, request, "answer", uploads)
+            return self._queue_turn(connection, task_id, request, "answer", sources)
 
     def _queue_turn(
         self, connection: sqlite3.Connection, task_id: str, request: str,
-        kind: str, uploads: dict[str, bytes] | None = None,
+        kind: str, sources=(),
     ) -> int:
         turn_id = connection.execute(
             "INSERT INTO turns (task_id, request, status, kind) VALUES (?, ?, 'queued', ?) RETURNING id",
             (task_id, request, kind),
         ).fetchone()["id"]
-        self._add_uploads(connection, task_id, turn_id, uploads)
+        self._add_uploads(connection, task_id, turn_id, sources)
         connection.execute(
             "UPDATE tasks SET status = 'queued', response = NULL, error = NULL WHERE id = ?", (task_id,)
         )
@@ -887,21 +929,82 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             "SELECT name, position, turn_id FROM uploads WHERE task_id = ? ORDER BY position", (task_id,)
         ).fetchall()
 
-    def _add_uploads(
-        self, connection: sqlite3.Connection, task_id: str, turn_id: int, uploads: dict[str, bytes] | None,
-    ) -> None:
-        if not uploads:
+    @staticmethod
+    def _prepare_uploads(uploads):
+        # Parsing can take seconds. Finish before claiming the SQLite writer lock.
+        if len(uploads or {}) > MAX_FILES:
+            raise ValueError(f"An assignment can have up to {MAX_FILES} uploaded files.")
+        sources = []
+        for name, data in (uploads or {}).items():
+            document = None
+            if pdf_documents.is_pdf(data) or name.lower().endswith(".pdf"):
+                document = pdf_documents.extract_pdf(data)
+            sources.append((name, data, document))
+        return sources
+
+    def _add_uploads(self, connection: sqlite3.Connection, task_id: str, turn_id: int, sources) -> None:
+        if not sources:
             return
         existing = self._uploads(connection, task_id)
-        if any(row["name"] in uploads for row in existing):
+        names = {name for name, _, _ in sources}
+        if any(row["name"] in names for row in existing):
             raise ValueError("An upload already uses that filename. Choose a new filename.")
-        if len(existing) + len(uploads) > MAX_FILES:
+        if len(existing) + len(sources) > MAX_FILES:
             raise ValueError(f"An assignment can have up to {MAX_FILES} uploaded files.")
         start = existing[-1]["position"] + 1 if existing else 0
-        connection.executemany(
-            "INSERT INTO uploads (task_id, position, name, content, turn_id) VALUES (?, ?, ?, ?, ?)",
-            ((task_id, i, name, data, turn_id) for i, (name, data) in enumerate(uploads.items(), start)),
-        )
+        for position, (name, data, document) in enumerate(sources, start):
+            connection.execute("INSERT INTO uploads(task_id, position, name, content, turn_id) VALUES (?,?,?,?,?)",
+                               (task_id, position, name, data, turn_id))
+            if document is not None:
+                connection.executemany(
+                    "INSERT INTO pdf_upload_pages(task_id,name,number,start_line,end_line,text) VALUES(?,?,?,?,?,?)",
+                    ((task_id, name, page.number, page.start_line, page.end_line, page.text) for page in document.pages),
+                )
+
+    @staticmethod
+    def _pdf_layout(connection, task_id, name):
+        rows = connection.execute("""SELECT number,start_line,end_line,text != '' AS has_text
+            FROM pdf_upload_pages WHERE task_id=? AND name=? ORDER BY number""", (task_id, name))
+        return [{**dict(row), "has_text": bool(row["has_text"])} for row in rows]
+
+    def pdf_layouts(self, task_id):
+        with self._connection() as db:
+            names = db.execute("SELECT DISTINCT name FROM pdf_upload_pages WHERE task_id=?", (task_id,))
+            return {name: self._pdf_layout(db, task_id, name) for (name,) in names}
+
+    @staticmethod
+    def _pdf_text(connection, task_id, name):
+        rows = connection.execute("SELECT text FROM pdf_upload_pages WHERE task_id=? AND name=? ORDER BY number",
+                                  (task_id, name)).fetchall()
+        if rows:
+            return "\n".join(row["text"] for row in rows) + "\n"
+        return None
+
+    def read_pdf_view(self, task_id, name, page, overview_line_limit):
+        """Load line ranges for navigation and only the text shown in the current view."""
+        with self._connection() as db:
+            layout = self._pdf_layout(db, task_id, name)
+            if not layout or (page is None and layout[-1]["end_line"] > overview_line_limit):
+                return layout, {}
+            sql = "SELECT number,text FROM pdf_upload_pages WHERE task_id=? AND name=?"
+            args = [task_id, name]
+            if page is not None:
+                sql += " AND number=?"
+                args.append(page)
+            return layout, {number: text.split("\n") for number, text in db.execute(sql, args)}
+
+    def read_upload_projection(self, task_id, name):
+        """Access the immutable extracted text and its original physical page boundaries."""
+        with self._connection() as db:
+            layout = self._pdf_layout(db, task_id, name)
+            if layout:
+                return self._pdf_text(db, task_id, name), layout
+        return None
+
+    def read_upload_text(self, task_id, name):
+        with self._connection() as db:
+            text = self._pdf_text(db, task_id, name)
+        return text.encode("utf-8") if text is not None else self.read_upload(task_id, name)
 
     def _upload_bytes(self, task_id: str, entry: sqlite3.Row) -> bytes:
         if entry["content"] is not None:
@@ -911,10 +1014,16 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
 
     def read_uploads(self, task_id: str) -> dict[str, str]:
         with self._connection() as connection:
-            entries = connection.execute(
-                "SELECT name, position, content FROM uploads WHERE task_id = ? ORDER BY position", (task_id,)
-            )
-            return {entry["name"]: self._upload_bytes(task_id, entry).decode("utf-8") for entry in entries}
+            result = {}
+            for entry in self._uploads(connection, task_id):
+                name = entry["name"]
+                text = self._pdf_text(connection, task_id, name)
+                if text is None:
+                    original = connection.execute("SELECT position,content FROM uploads WHERE task_id=? AND name=?",
+                                                  (task_id, name)).fetchone()
+                    text = self._upload_bytes(task_id, original).decode("utf-8")
+                result[name] = text
+            return result
 
     def read_upload(self, task_id: str, name: str) -> bytes | None:
         with self._connection() as connection:

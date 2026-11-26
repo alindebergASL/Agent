@@ -1,6 +1,6 @@
 # Work Agent
 
-Work Agent accepts a request and uploaded text files, runs a background assignment, and saves the resulting CSV and Markdown files for you to reopen.
+Work Agent accepts a request and uploaded PDFs or text files, runs a background assignment, and saves the resulting CSV and Markdown files for you to reopen.
 
 The app can batch independent file reads in an OpenAI-hosted program and still use direct calls for individual operations. Both paths use the same file reader. Calculations and artifact writes use direct calls. For public research, the hosted web tool can search and open source pages. Ask for a saved brief with links to the pages that support its claims.
 
@@ -77,6 +77,14 @@ Connected-source citations reopen the snapshot saved at check time. Public web c
 
 [Try the two-watch example](examples/watches/README.md) · [How the agent uses memory before acting](docs/knowledge-foundation.md)
 
+## Work with PDF sources
+
+Upload a searchable PDF with an assignment, a follow-up, or an answer to a clarification. A later assignment can find and cite the same original. A citation opens the physical page with its rendered image and numbered text. **Download original** returns the uploaded bytes, including the original layout. Physical page 1 is the first page in the file, even if the document labels it as a cover or uses Roman numerals.
+
+The app extracts text locally and stores it by page in the existing SQLite volume. The agent reads that text. The page image lets you check the layout, charts, and figures yourself. Textless pages in a mixed document are identified in the reader. For an image-only scan, supply an OCR-processed copy. Unlock encrypted files before uploading them. PDFs may be up to 16 MiB and 500 pages, with a 4 MiB extracted-text limit.
+
+[Try a policy amendment and a cross-page calculation](examples/pdf/README.md).
+
 ## Find a file from earlier work
 
 To reuse earlier work, describe an original upload or generated file by name, assignment, or a passage you remember. The agent can find the passage, open the exact version and cite its rows. You can also start a new assignment directly from an open upload or saved revision. [Try the meeting-brief, CSV, and original-quote examples](docs/find-saved-work.md).
@@ -100,6 +108,7 @@ Compose mounts the named volume `agent-data` at `/data`. Each Compose project no
 | Data | Location and identity |
 | --- | --- |
 | Original uploads | SQLite database `/data/agent.sqlite3`, table `uploads`. Each record contains the original bytes, filename, upload position, and links to the assignment and turn. Within an assignment each filename is unique. |
+| PDF page text | The same database, table `pdf_upload_pages`. Each page records the physical page number, its extracted text, and a stable range of numbered lines. |
 | Generated files | The same database, table `artifact_revisions`. Each published version has an assignment, filename, revision number, author, and content. A user edit creates another revision. |
 | Reused files | The consuming assignment holds a reference back to the original upload or a specific generated revision. The same filename can exist in several assignments. |
 | Early installations | An upload from the first storage format may still have its bytes at `/data/runs/<assignment-id>/inputs/<position>`. The database records the position and the reader supports both formats. |

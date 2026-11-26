@@ -4,6 +4,9 @@ import json
 import re
 from urllib.parse import quote, unquote
 
+from .artifact_preview import PRIOR_CITATION
+from .evidence_links import physical_pdf_page
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS project_notes (
     id INTEGER PRIMARY KEY, scope TEXT NOT NULL UNIQUE COLLATE NOCASE
@@ -22,9 +25,10 @@ CREATE TABLE IF NOT EXISTS staged_project_notes (
 );
 """
 
-LOCAL_SOURCE = re.compile(r"/tasks/([0-9a-f]{32})/(uploads|artifacts|evidence)/([^/#?]+)(?:\?revision=([1-9]\d{0,17}))?(?:#L([1-9]\d{0,8}))?")
-PRIOR_SOURCE = re.compile(r"\.\./prior-artifacts/([1-9]\d{0,17})(?:#L([1-9]\d{0,8}))?")
-LOCAL_ALIAS = re.compile(r"\.\./(uploads|artifacts|evidence)/([^/#?]+)(?:\?revision=([1-9]\d{0,17}))?(?:#L([1-9]\d{0,8}))?")
+SOURCE_PATH = (r"(uploads|artifacts|evidence)/([^/#?]+)"
+               r"(?:\?revision=([1-9][0-9]{0,17})|\?page=([1-9][0-9]{0,5}))?(?:#L([1-9][0-9]{0,8}))?")
+LOCAL_SOURCE = re.compile(r"/tasks/([0-9a-f]{32})/" + SOURCE_PATH)
+LOCAL_ALIAS = re.compile(r"\.\./" + SOURCE_PATH)
 MAX_CLAIMS = 32
 
 
@@ -112,31 +116,43 @@ class ProjectNoteStore:
     def resolve_note_source(self, task_id, source):
         if not isinstance(source, str) or len(source) > 2048:
             raise ValueError("Provide a source URL for each claim.")
-        pin = PRIOR_SOURCE.fullmatch(source)
+        pin = PRIOR_CITATION.fullmatch(source)
         if task_id and pin:
-            ref = self.prior_artifact(task_id, int(pin[1]))
+            ref = self.prior_artifact(task_id, int(pin["reference"]))
             if ref is None:
                 raise ValueError("The cited earlier file was not pinned to this assignment.")
             kind = "uploads" if ref["revision"] is None else "artifacts"
             url = f"/tasks/{ref['source_task_id']}/{kind}/{quote(ref['name'], safe='')}"
             if ref["revision"] is not None:
                 url += f"?revision={ref['revision']}"
-            source = url + (f"#L{pin[2]}" if pin[2] else "")
+            if pin["page"]:
+                if ref["revision"] is not None:
+                    raise ValueError("Physical pages belong to original PDF uploads.")
+                url += f"?page={pin['page']}"
+            source = url + (f"#L{pin['line']}" if pin["line"] else "")
         elif task_id and LOCAL_ALIAS.fullmatch(source):
             source = f"/tasks/{task_id}/" + source[3:]
         match = LOCAL_SOURCE.fullmatch(source)
         if not match:
             raise ValueError("Cite an exact original upload line, saved file revision, or connected evidence snapshot.")
-        source_task, kind, encoded, revision, line = match.groups()
+        source_task, kind, encoded, revision, page, line = match.groups()
         name = unquote(encoded)
         if kind == "evidence":
-            if revision or line or self.source_evidence(source_task, name) is None:
+            if revision or line or page or self.source_evidence(source_task, name) is None:
                 raise ValueError("Unknown connected evidence snapshot.")
             return f"/tasks/{source_task}/evidence/{name}"
         if kind == "uploads":
             if revision or not line:
                 raise ValueError("Cite an original upload at a specific line, for example #L2.")
-            content = self.read_upload(source_task, name)
+            with self._connection() as db:
+                source_page = physical_pdf_page(db, source_task, name, int(line))
+            if source_page:
+                if not source_page["has_text"] or (page and int(page) != source_page["number"]):
+                    raise ValueError("The cited PDF page does not contain this extracted source line.")
+                return f"/tasks/{source_task}/uploads/{quote(name, safe='')}?page={source_page['number']}#L{line}"
+            if page:
+                raise ValueError("The cited PDF page or source line does not exist.")
+            content = self.read_upload_text(source_task, name)
         else:
             if not revision:
                 raise ValueError("Pin a specific generated file revision.")
@@ -145,7 +161,9 @@ class ProjectNoteStore:
         if content is None or (line and int(line) > len(content.decode("utf-8").splitlines())):
             raise ValueError("The cited file or line does not exist.")
         url = f"/tasks/{source_task}/{kind}/{quote(name, safe='')}"
-        return url + (f"?revision={revision}" if revision else "") + (f"#L{line}" if line else "")
+        if revision:
+            url += f"?revision={revision}"
+        return url + (f"#L{line}" if line else "")
 
     def _note_content(self, task_id, expected_revision, claims, reason):
         if type(expected_revision) is not int or not 0 <= expected_revision < 2**63 - 1:
