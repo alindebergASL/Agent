@@ -72,6 +72,9 @@ def _source_length(connection, upload_bytes, target):
             WHERE task_id=? AND name=? ORDER BY number DESC LIMIT 1""", (task_id, name)).fetchone()
         if last_page:
             return last_page[0]
+        office = connection.execute("SELECT text FROM office_upload_text WHERE task_id=? AND name=?", (task_id,name)).fetchone()
+        if office:
+            return len(office[0].splitlines())
         row = connection.execute("SELECT content, position FROM uploads WHERE task_id=? AND name=?", (task_id, name)).fetchone()
         try:
             data = upload_bytes(task_id, row) if row else None

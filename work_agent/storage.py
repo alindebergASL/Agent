@@ -10,7 +10,7 @@ from pathlib import Path
 from .methods import initialize_method_search, ranked_methods
 from . import memory_context, project_notes
 from . import evidence_changes, evidence_links
-from . import passages, pdf_documents, watch_history, watch_subjects, watches
+from . import office_documents, passages, pdf_documents, watch_history, watch_subjects, watches
 from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
 
 
@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS uploads (
     turn_id INTEGER REFERENCES turns(id),
     PRIMARY KEY (task_id, position),
     UNIQUE (task_id, name)
+);
+CREATE TABLE IF NOT EXISTS office_upload_text (
+    task_id TEXT NOT NULL, name TEXT NOT NULL, text TEXT NOT NULL,
+    PRIMARY KEY(task_id,name), FOREIGN KEY(task_id,name) REFERENCES uploads(task_id,name)
 );
 CREATE TABLE IF NOT EXISTS pdf_upload_pages (
     task_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -939,6 +943,8 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             document = None
             if pdf_documents.is_pdf(data) or name.lower().endswith(".pdf"):
                 document = pdf_documents.extract_pdf(data)
+            elif ext := office_documents.kind(name):
+                document = office_documents.extract(data, ext)
             sources.append((name, data, document))
         return sources
 
@@ -955,7 +961,9 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         for position, (name, data, document) in enumerate(sources, start):
             connection.execute("INSERT INTO uploads(task_id, position, name, content, turn_id) VALUES (?,?,?,?,?)",
                                (task_id, position, name, data, turn_id))
-            if document is not None:
+            if isinstance(document, str):
+                connection.execute("INSERT INTO office_upload_text VALUES(?,?,?)", (task_id,name,document))
+            elif document is not None:
                 connection.executemany(
                     "INSERT INTO pdf_upload_pages(task_id,name,number,start_line,end_line,text) VALUES(?,?,?,?,?,?)",
                     ((task_id, name, page.number, page.start_line, page.end_line, page.text) for page in document.pages),
@@ -973,12 +981,13 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             return {name: self._pdf_layout(db, task_id, name) for (name,) in names}
 
     @staticmethod
-    def _pdf_text(connection, task_id, name):
+    def _projected_text(connection, task_id, name):
         rows = connection.execute("SELECT text FROM pdf_upload_pages WHERE task_id=? AND name=? ORDER BY number",
                                   (task_id, name)).fetchall()
         if rows:
             return "\n".join(row["text"] for row in rows) + "\n"
-        return None
+        office = connection.execute("SELECT text FROM office_upload_text WHERE task_id=? AND name=?", (task_id,name)).fetchone()
+        return office[0] if office else None
 
     def read_pdf_view(self, task_id, name, page, overview_line_limit):
         """Load line ranges for navigation and only the text shown in the current view."""
@@ -998,12 +1007,12 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         with self._connection() as db:
             layout = self._pdf_layout(db, task_id, name)
             if layout:
-                return self._pdf_text(db, task_id, name), layout
+                return self._projected_text(db, task_id, name), layout
         return None
 
     def read_upload_text(self, task_id, name):
         with self._connection() as db:
-            text = self._pdf_text(db, task_id, name)
+            text = self._projected_text(db, task_id, name)
         return text.encode("utf-8") if text is not None else self.read_upload(task_id, name)
 
     def _upload_bytes(self, task_id: str, entry: sqlite3.Row) -> bytes:
@@ -1017,7 +1026,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             result = {}
             for entry in self._uploads(connection, task_id):
                 name = entry["name"]
-                text = self._pdf_text(connection, task_id, name)
+                text = self._projected_text(connection, task_id, name)
                 if text is None:
                     original = connection.execute("SELECT position,content FROM uploads WHERE task_id=? AND name=?",
                                                   (task_id, name)).fetchone()

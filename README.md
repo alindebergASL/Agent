@@ -156,3 +156,11 @@ docker compose -f compose.yaml -f tests/compose.fixture.yaml up -d --force-recre
 ```
 
 Submit the two-shipment request and open both saved files before running the recreation command. After recreation, reopen them and submit the same request with one shipment. The fixture supports those two prompts and computes its outputs from the uploaded rows and arithmetic tool results.
+
+### Excel and Word evidence
+
+Upload a macro-free `.xlsx` workbook or `.docx` document with an assignment or follow-up. The original download is preserved. Each source link opens a frozen line labeled with its worksheet and cell, Word body paragraph, or Word table row and column. A later assignment can discover the original through saved-work search. Reopen the cited line to inspect the supporting value in context.
+
+Excel shows stored values, cell types, number formats, and formula expressions. Formulas are unevaluated. Use literal inputs to reproduce a calculation. Word extraction covers body paragraphs and ordinary tables. Headers, footers, tracked revisions, drawings, and embedded images are outside that coverage. Use a searchable PDF when the decision depends on the printed page. For legacy binary `.doc`, save a copy as `.docx` or export a searchable PDF.
+
+**Live acceptance on an isolated Compose project.** Generate sample uploads with `python -m tests.test_office_documents /tmp/office-demo` in the app environment. Upload `original/budget.xlsx` and ask whether ten units fit a $100 cap, requesting a saved decision with sources. In a fresh assignment upload `revised/budget.xlsx` and ask for the current and previous decisions with citations. Expected totals are $80 and $120. Open each rate citation and check that it selects the corresponding Rates!B1. Upload `policy.docx` and ask when general reviews occur and which visits qualify for the exception. Check that the two citations open the body paragraph and table cell, respectively. Recreate the isolated app container with its volume and reopen the decisions and original downloads.
