@@ -17,6 +17,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from tests.quote_fixture import answer, call, tool_outputs
+from work_agent.methods import method_page
 from work_agent.runner import OpenAIModel
 from work_agent.storage import Store
 from work_agent.web import create_app
@@ -38,6 +39,25 @@ CORPUS = [
     ("Classify ocean freight surcharges", "Container shipping surcharge audits on ocean routes.",
      "Separate the documented container surcharge from the monthly carrier adjustment."),
 ]
+# Populate a larger catalog only for the prefix-size experiment. Every arm receives
+# the same branch-specific procedures alongside the two applicable global methods.
+PREFIX_POLICIES = {"ranked-1": 1, "ranked-3": 3, "ranked-8": 8, "production": None}
+BRANCHES = ("Arden", "Birch", "Cliff", "Delta", "Elm", "Fern", "Grove", "Hill", "Iris", "Juniper", "Larch", "Mesa")
+RECORD_ACTIONS = ("Archive signed records", "Check translated records", "Redact public records")
+
+
+def branch_methods():
+    for branch in BRANCHES:
+        for domain in ("supplier quote", "software release"):
+            for action in RECORD_ACTIONS:
+                title = f"{action} for {branch} {domain} packets"
+                scope = (f"Only applies when the {branch} branch documentation team is asked to perform "
+                         f"the following administrative task for its {domain} records: {action.lower()}. "
+                         f"The receiving branch must be {branch}. This procedure covers documentation "
+                         "after an approved transaction and does not determine the original decision.")
+                yield title, scope, f"Confirm the {branch} branch and authorized filing queue before applying the record procedure."
+
+
 # Independently specified expected decisions; include a quote revision that flips the winner.
 FREIGHT_CASES = {
     "split": (2, 30, (1060, 1050)),
@@ -80,13 +100,13 @@ def inputs(case):
     return request, SOURCE, source
 
 
-def seed(store):
+def seed(store, extra_methods=()):
     store.initialize()
     task = store.submit("Curate reusable procedures", {})
     if store.claim() != task:
         raise RuntimeError("Unable to claim the evaluation seed assignment.")
     store.complete(task, "Verified the procedures.")
-    for title, scope, procedure in CORPUS:
+    for title, scope, procedure in (*CORPUS, *extra_methods):
         store.save_method(task, title, scope, procedure, "Verified during curation.")
 
 
@@ -100,9 +120,13 @@ class FixtureModel:
         request = json.loads(history[0]["content"])
         results = tool_outputs(history)
         title = FREIGHT_METHOD if self.case in FREIGHT_CASES else RELEASE_METHOD
-        target = next((m for m in request.get("saved_methods", []) if m["title"] == title), None)
+        pages = [request] + [result for result in results.values() if "saved_methods" in result]
+        target = next((m for page in pages for m in page.get("saved_methods", []) if m["title"] == title), None)
         if target and "procedure" not in results:
             output = [call("procedure", "read_method", method_id=target["id"])]
+        elif not target and "next_method_offset" in pages[-1]:
+            offset = pages[-1]["next_method_offset"]
+            output = [call(f"page-{offset}", "list_more_methods", offset=offset)]
         elif "source" not in results:
             output = [call("source", "read_file", file_id=request["uploaded_files"][0], start_line=1, line_count=10)]
         elif "file" in results:
@@ -135,6 +159,8 @@ class ObservedModel:
     def __init__(self, model):
         self.model = model
         self.offered = []
+        self.pagination_available = False
+        self.pages_read = set()
         self.retrieved = set()
         self.source_rows = set()
         self.provider_models = set()
@@ -142,9 +168,12 @@ class ObservedModel:
 
     def respond(self, history, tools, instructions, *, max_tool_calls):
         self.offered = json.loads(history[0]["content"]).get("saved_methods", [])
+        self.pagination_available = any(tool.get("name") == "list_more_methods" for tool in tools)
         for item in history:
             if item["type"] == "function_call_output":
                 data = json.loads(item["output"])
+                if isinstance(data, dict) and "saved_methods" in data:
+                    self.pages_read.add(item["call_id"])
                 if isinstance(data, dict) and {"id", "procedure", "scope"} <= data.keys():
                     self.retrieved.add(data["id"])
                 if isinstance(data, dict) and "file_id" in data and "lines" in data:
@@ -192,6 +221,16 @@ def recent_eight(store, request, context):
     return store.list_methods(limit=8)
 
 
+def prefix_policy(limit):
+    def page(methods, offset):
+        result = method_page(methods, offset)
+        if offset == 0 and limit < len(result["saved_methods"]):
+            return {"saved_methods": result["saved_methods"][:limit], "next_method_offset": limit}
+        return result
+
+    return patch("work_agent.runner.method_page", page)
+
+
 def evaluate(case, arm, mode):
     request, filename, source = inputs(case)
     target_id = 1 if case in FREIGHT_CASES else 2
@@ -199,9 +238,11 @@ def evaluate(case, arm, mode):
              if mode == "live" else FixtureModel(case))
     observed = ObservedModel(model)
     policy = patch.object(Store, "relevant_methods", recent_eight) if arm == "recent-eight" else nullcontext()
+    if arm in PREFIX_POLICIES and PREFIX_POLICIES[arm] is not None:
+        policy = prefix_policy(PREFIX_POLICIES[arm])
     with tempfile.TemporaryDirectory() as root, policy, patch.dict(os.environ, {"WORK_AGENT_MCP_CONFIG": ""}):
         store = Store(Path(root))
-        seed(store)
+        seed(store, branch_methods() if arm in PREFIX_POLICIES else ())
         with TestClient(create_app(Path(root), observed)) as client:
             submitted = client.post("/tasks", data={"request": request},
                                     files=[("files", (filename, source, "text/plain"))], follow_redirects=False)
@@ -221,6 +262,7 @@ def evaluate(case, arm, mode):
             checks["sources_read"] = all(f"{filename}:{n}" in observed.source_rows for n in cited_lines)
             return {
                 "case": case, "policy": arm, "status": state["status"], "error": state.get("error"),
+                "pagination_available": observed.pagination_available, "additional_pages_read": len(observed.pages_read),
                 "offered_ids": [row["id"] for row in observed.offered], "read_ids": sorted(observed.retrieved),
                 "target_method_read": target_id in observed.retrieved, "checks": checks,
                 "decision_pass": state["status"] == "completed" and all(checks.values()),
@@ -234,6 +276,8 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--fixture", action="store_true")
     mode.add_argument("--live", action="store_true")
+    parser.add_argument("--compare-prefixes", action="store_true",
+                        help="Compare 1, 3, and 8 initially ranked methods against the default byte-limited page.")
     parser.add_argument("--repeats", type=int, default=2)
     args = parser.parse_args()
     if args.repeats < 1:
@@ -243,20 +287,24 @@ def main():
     runs = []
     mode_name = "live" if args.live else "fixture"
     report = {"mode": mode_name, "requested_model": MODEL if args.live else None, "runs": runs}
+    policies = list(PREFIX_POLICIES) if args.compare_prefixes else ["recent-eight", "relevance"]
     for repeat in range(args.repeats):
         for n, case in enumerate(CASES):
-            arms = ["recent-eight", "relevance"]
-            if (repeat + n) % 2:
-                arms.reverse()
+            start = (repeat + n) % len(policies)
+            arms = policies[start:] + policies[:start]
             for arm in arms:
                 print(f"{mode_name}: pair {repeat + 1} / {case} / {arm}", file=sys.stderr, flush=True)
                 result = evaluate(case, arm, mode_name)
                 runs.append({"repeat": repeat + 1, **result})
     summary = {}
-    for policy in ("recent-eight", "relevance"):
+    for policy in policies:
         group = [row for row in runs if row["policy"] == policy]
         summary[policy] = {"runs": len(group), "decisions_passed": sum(row["decision_pass"] for row in group),
                            "target_reads": sum(row["target_method_read"] for row in group)}
+        if args.compare_prefixes:
+            summary[policy]["initial_counts"] = sorted({len(row["offered_ids"]) for row in group})
+            summary[policy]["trials_with_pagination"] = sum(row["pagination_available"] for row in group)
+            summary[policy]["additional_pages_read"] = sum(row["additional_pages_read"] for row in group)
     report["summary"] = summary
     print(json.dumps(report, indent=2))
     return int(any(row["status"] != "completed" for row in runs))

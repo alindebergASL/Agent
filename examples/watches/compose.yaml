@@ -1,0 +1,18 @@
+services:
+  app:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    environment:
+      WORK_AGENT_MCP_CONFIG: /run/work-agent/sources.json
+    volumes:
+      - ./examples/watches/sources.json:/run/work-agent/sources.json:ro
+    networks: [default, bulletins]
+  bulletin:
+    image: ${COMPOSE_PROJECT_NAME}-app
+    pull_policy: never
+    command: ["python", "-m", "tests.connected_source_fixture", "--role", "bulletin", "--file", "/bulletins/current.csv", "--host", "0.0.0.0"]
+    volumes:
+      - ${WORK_AGENT_DEMO_BULLETINS:?set to the demo directory}:/bulletins:ro
+    networks: [bulletins]
+networks:
+  bulletins:
+    internal: true

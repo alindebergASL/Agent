@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .methods import initialize_method_search, ranked_methods
-from . import project_notes
+from . import memory_context, project_notes
 from . import evidence_changes, evidence_links
-from . import passages
+from . import passages, watch_history, watch_subjects, watches
 from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
 
 
@@ -157,7 +157,7 @@ class InactiveTurn(RuntimeError):
     """The worker's turn is no longer the active running turn."""
 
 
-class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore):
+class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore, watches.WatchStore):
     def __init__(self, root: Path):
         self.root = Path(root)
 
@@ -181,7 +181,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version < SCHEMA_VERSION:
                 self._upgrade_turn_schema(connection)
-            for statement in (SCHEMA + project_notes.SCHEMA + evidence_changes.SCHEMA).split(";"):
+            for statement in (SCHEMA + project_notes.SCHEMA + evidence_changes.SCHEMA + watches.SCHEMA).split(";"):
                 if statement.strip():
                     connection.execute(statement)
             if version < SCHEMA_VERSION:
@@ -232,7 +232,10 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                        SELECT reference_id, task_id, source_task_id, name, revision FROM prior_artifacts_legacy"""
                 )
                 connection.execute("DROP TABLE prior_artifacts_legacy")
+            watch_history.initialize(connection)
+            watch_subjects.initialize(connection)
             initialize_method_search(connection)
+            memory_context.initialize(connection)
             evidence_links.initialize(connection, self._upload_bytes)
             self._initialize_saved_work_search(connection)
             passages.initialize(connection)
@@ -247,7 +250,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             )
             connection.execute("""DELETE FROM evidence_changes WHERE published=0 AND turn_id IN
                                (SELECT id FROM turns WHERE status='interrupted')""")
-            for table in ("staged_artifacts", "staged_methods", "staged_project_notes"):
+            for table in ("staged_artifacts", "staged_methods", "staged_project_notes", "staged_watch_assessments"):
                 connection.execute(
                     f"DELETE FROM {table} WHERE turn_id IN (SELECT id FROM turns WHERE status = 'interrupted')"
                 )
@@ -653,6 +656,8 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             if row is None:
                 return None
             task = dict(row)
+            watch = connection.execute("SELECT watch_id FROM watch_checks WHERE task_id=?", (task_id,)).fetchone()
+            task["watch_id"] = watch["watch_id"] if watch else None
             task["uploads"] = [upload["name"] for upload in self._uploads(connection, task_id)]
             task["turns"] = self._turns(connection, task_id)
             task["events"] = [
@@ -870,6 +875,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                 "kind": active["kind"],
                 "attached_files": source_turn.get("attached_files", []),
                 "prior_messages": messages,
+                "watch": watches.context(connection, task_id),
                 "prior_artifacts": self._prior_artifacts(connection, task_id),
                 "artifacts": {
                     row["name"]: {"revision": row["revision"], "author": row["author"]} for row in artifacts
@@ -972,6 +978,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
     def _discard_drafts(self, connection: sqlite3.Connection, turn_id: int) -> None:
         connection.execute("DELETE FROM staged_artifacts WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM staged_methods WHERE turn_id = ?", (turn_id,))
+        connection.execute("DELETE FROM staged_watch_assessments WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM staged_project_notes WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM evidence_changes WHERE turn_id=? AND published=0", (turn_id,))
 
@@ -1072,6 +1079,14 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             active = self._running_turn(connection, task_id, turn_id)
+            try:
+                watch_outcome = watches.publish(connection, task_id, active)
+            except watches.WatchError as exc:
+                raise RevisionConflict(str(exc)) from exc
+            # Partial observations can explain an outage, but cannot justify
+            # publishing staged decisions or procedures based on incomplete evidence.
+            if watch_outcome == "unavailable":
+                self._discard_drafts(connection, active)
             drafts = connection.execute(
                 """
                 SELECT draft.name, draft.content, COALESCE(pins.revision, 0) AS expected,
@@ -1234,6 +1249,10 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                 (limit if limit is not None else -1,),
             )
             return [dict(row) for row in rows]
+
+    def relevant_project_memory(self, request: str, context: list[str]) -> dict:
+        with self._connection() as connection:
+            return memory_context.select(connection, request, context, self.changes_for_note_claims)
 
     def relevant_methods(self, request: str, context: list[str]) -> list[dict]:
         with self._connection() as connection:

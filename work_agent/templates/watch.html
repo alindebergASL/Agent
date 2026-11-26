@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "watch_evidence.html" import source_links %}
+{% block title %}Watch · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('watches') }}">← Watches</a>
+<section class="panel" data-watch-id="{{ watch.id }}">
+  <h1>Watch</h1>
+  {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+  <p class="prose">{{ watch.request }}</p>
+  {% if watch.required_urls %}<p>Required pages</p>{{ source_links(watch.required_urls) }}{% endif %}
+  {% if watch.subject %}
+    <p>Watching <a href="{{ watch.subject.url }}">{{ watch.subject.label }}</a>
+      {% if watch.subject.revision != watch.subject.starting_revision %}
+        · <a href="{{ watch.subject.starting_url }}">Starting revision {{ watch.subject.starting_revision }}</a>
+      {% endif %}
+    </p>
+  {% endif %}
+  {% if watch.stopped_at is none %}
+    <p>Checks {{ "every day" if watch.cadence == "daily" else "every " ~ weekdays[watch.weekday] }} at {{ watch.local_time }} Pacific.
+       Next check {{ watch.next_run_at|watch_time }}.</p>
+    <div class="watch-controls">
+      <form action="{{ url_for('check_watch_now', watch_id=watch.id) }}" method="post">
+        <button type="submit"{% if not enabled %} disabled{% endif %}>Check now</button>
+      </form>
+      <form action="{{ url_for('stop_watch', watch_id=watch.id) }}" method="post">
+        <button type="submit" class="secondary">Stop watch</button>
+      </form>
+    </div>
+    {% if not enabled %}<p class="notice">Configure a model to run watch checks.</p>{% endif %}
+  {% else %}
+    <p>Stopped {{ watch.stopped_at|watch_time }}.</p>
+  {% endif %}
+</section>
+<section class="panel">
+  <h2>Check history</h2>
+  {% for check in watch.checks %}
+  <article class="turn" id="check-{{ check.task_id }}">
+    <h3>{{ watch_outcomes.get(check.outcome, check.status|replace('_',' ')|capitalize) }}</h3>
+    <p class="help">{{ "Requested on demand" if check.manual else "Scheduled" }} · {{ check.due_at|watch_time }}</p>
+    {% if check.summary %}<p class="prose">{{ check.summary }}</p>{% endif %}
+    {% if check.error %}<p class="notice">{{ check.error }}</p>{% endif %}
+    {{ source_links(check.evidence) }}
+    {% for finding in check.findings %}
+      <p><strong>{{ finding.title }}</strong></p>
+      <p class="prose">{{ finding.why }}</p>
+      {{ source_links(finding.evidence) }}
+    {% endfor %}
+    <a href="{{ url_for('assignment', task_id=check.task_id) }}">Open check</a>
+  </article>
+  {% else %}
+  <p>No checks yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}

@@ -11,7 +11,8 @@ from openai import APIError, OpenAI
 
 from .methods import method_page
 from .calculation_evidence import CONDITION_PROPERTIES, INPUT_PROPERTIES, calculate_with_evidence
-from . import cited_evidence, evidence_changes, note_tools
+from . import cited_evidence, evidence_changes, memory_context, note_tools
+from . import watch_assessment
 from .research import WEB_SEARCH_TOOL, web_search_observations
 
 
@@ -290,8 +291,23 @@ STAGE_EVIDENCE_CHANGE = _tool(
     "Record how a new source supersedes, qualifies or contradicts an earlier source within an explicit scope.",
     evidence_changes.TOOL_PARAMETERS,
 )
+SEARCH_WATCH_FINDINGS = _tool(
+    "search_watch_findings", "Find earlier findings in this watch by stable identifier or keyword, "
+    "including acknowledged items. Start at offset zero. Check an older finding before alerting "
+    "on a possibly repeated event. Returned citations are historical.",
+    {"query": {"type": "string"}, "offset": {"type": "integer"}},
+)
+STAGE_WATCH = _tool(
+    "stage_watch_assessment", "Complete this watch check using current evidence and a comparison to prior state.",
+    watch_assessment.PARAMETERS,
+)
+OBSERVE_SUBJECT = _tool(
+    "observe_watch_subject", "Read a page of the attached workspace item's current version at check time.",
+    {"start_line": {"type": "integer"}, "line_count": {"type": "integer"}},
+)
 NOTE_TOOL_NAMES = {tool["name"] for tool in NOTE_TOOLS}
-TOOL_NAMES = NOTE_TOOL_NAMES | {"stage_evidence_change", "read_cited_evidence"} | {
+TOOL_NAMES = NOTE_TOOL_NAMES | {"stage_evidence_change", "read_cited_evidence", "stage_watch_assessment",
+                                "observe_watch_subject", "search_watch_findings"} | {
     tool["name"] for tool in (*TOOLS, READ_SAVED_ARTIFACT, READ_PRIOR_ARTIFACT, SEARCH_SAVED_WORK,
                               OPEN_SAVED_WORK, FIND_EVIDENCE_USES, READ_METHOD, LIST_MORE_METHODS, STAGE_RECOVERY_METHOD)
 }
@@ -583,12 +599,17 @@ def run_assignment(
     search_saved_work: Callable[..., list[dict]] | None = None,
     pin_saved_work: Callable[[str, str, int | None], dict] | None = None,
     method_index: list[dict] | None = None,
+    project_memory: dict | None = None,
     read_method: Callable[[int], dict | None] | None = None,
     stage_method: Callable[[str, str, str, str], None] | None = None,
     project_note_store=None,
     task_id: str | None = None,
     stage_project_note=None,
     change_tracker: evidence_changes.AssignmentEvidenceChanges | None = None,
+    watch_context=None,
+    search_watch_findings=None,
+    stage_watch_assessment=None,
+    observe_watch_subject=None,
     connected_catalog=None,
     tool_scope: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> str:
@@ -616,6 +637,13 @@ def run_assignment(
         return page
 
     tools = RESPONSES_TOOLS.copy()
+    watch = watch_assessment.WatchAssessment(watch_context, task_id) if watch_context is not None else None
+    if watch:
+        tools.append(STAGE_WATCH)
+        if search_watch_findings:
+            tools.append(SEARCH_WATCH_FINDINGS)
+        if observe_watch_subject:
+            tools.append(OBSERVE_SUBJECT)
     if change_tracker is not None:
         tools.append(STAGE_EVIDENCE_CHANGE)
     if project_note_store is not None and stage_project_note is not None:
@@ -643,6 +671,10 @@ def run_assignment(
     tools.extend(connected_tools)
     warnings = connected_catalog.warnings if connected_catalog is not None else []
     instructions = INSTRUCTIONS
+    if watch:
+        instructions += watch_assessment.INSTRUCTIONS
+    if project_memory:
+        instructions += memory_context.INSTRUCTIONS
     if change_tracker is not None:
         instructions += evidence_changes.INSTRUCTIONS
     if project_note_store is not None and stage_project_note is not None:
@@ -725,6 +757,11 @@ def run_assignment(
         return reference
 
     current_request = {"request": request, "uploaded_files": list(uploads)}
+    if watch:
+        current_request["watch"] = watch_context
+    if project_memory:
+        current_request["relevant_memory"] = project_memory
+        record({"type": "memory_context", **project_memory})
     if references:
         current_request["prior_artifacts"] = list(references.values())
     if warnings:
@@ -750,8 +787,11 @@ def run_assignment(
     lines_read: dict[str, set[int]] = {}
     fully_read: set[str] = set()
     source_lines = {}
-    disclosed_urls = set()
+    disclosed_urls = memory_context.source_urls(project_memory or {})
+    if watch:
+        disclosed_urls.update(watch.aliases)
     verified_artifact: str | None = None
+    prompted_watch_result = False
     for _ in range(16):
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
@@ -776,6 +816,8 @@ def run_assignment(
                 progress(f"Hosted program {item['call_id']} {item['status']}.")
         for observation in web_search_observations(output):
             if observation["type"] == "web_search_call":
+                if watch:
+                    watch.observe_web(observation)
                 action = observation["action"]
                 progress(f"Web research: {action['type'].replace('_', ' ')}.")
         final_content = [
@@ -798,6 +840,13 @@ def run_assignment(
             answer = "\n".join(
                 part["text"] for part in final_content if part["type"] == "output_text"
             ).strip()
+            if answer and watch:
+                if prompted_watch_result:
+                    raise AssignmentError("This check finished without a verified watch assessment.")
+                history.append({"type": "message", "role": "developer",
+                                "content": "Complete this watch with stage_watch_assessment. Report unavailable if fresh evidence is missing."})
+                prompted_watch_result = True
+                continue
             if answer:
                 return answer
             if any(
@@ -835,6 +884,34 @@ def run_assignment(
             return result
 
         def dispatch(call, connected_read=None):
+            if watch and call.get("name") == "search_watch_findings" and search_watch_findings:
+                try:
+                    args = json.loads(call["arguments"])
+                    if (call.get("caller") or {}).get("type") == "program" or not isinstance(args, dict) or args.keys() != {"query", "offset"}:
+                        raise ValueError("Call directly with a query and a page offset.")
+                    return search_watch_findings(**args)
+                except (ValueError, TypeError, KeyError) as exc:
+                    return {"error": str(exc)}
+            if watch and call.get("name") == "request_user_input":
+                return {"error": "A background watch must report unavailable if it cannot complete its check."}
+            if watch and call.get("name") in {"stage_watch_assessment", "observe_watch_subject"}:
+                try:
+                    if (call.get("caller") or {}).get("type") == "program":
+                        raise ValueError("Call the watch tool directly.")
+                    args = json.loads(call["arguments"])
+                    if call["name"] == "observe_watch_subject" and observe_watch_subject is not None:
+                        if not isinstance(args, dict) or args.keys() != {"start_line", "line_count"}:
+                            raise ValueError("Supply start_line and line_count.")
+                        return observe_watch_subject(**args)
+                    if call["name"] != "stage_watch_assessment" or not stage_watch_assessment:
+                        raise ValueError("This watch tool is unavailable.")
+                    if len(calls) != 1:
+                        raise ValueError("Complete the evidence reads before submitting the watch assessment separately.")
+                    assessment = watch.validate(args)
+                    stage_watch_assessment(**assessment)
+                    return {"staged_watch_assessment": assessment["outcome"], "summary": assessment["summary"]}
+                except (ValueError, TypeError, KeyError) as exc:
+                    return {"error": str(exc)}
             if call.get("name") in NOTE_TOOL_NAMES and project_note_store is not None and stage_project_note is not None:
                 return note_tools.dispatch(call, history[:delivered], project_note_store, stage_project_note)
             return _dispatch(
@@ -899,6 +976,18 @@ def run_assignment(
                 continue
             if tool_label == "request_user_input" and "question" in result:
                 raise NeedsUserInput(result["question"])
+            if watch:
+                if name == "stage_watch_assessment" and "staged_watch_assessment" in result:
+                    return result["summary"]
+                try:
+                    arguments = json.loads(call["arguments"])
+                except (ValueError, KeyError, TypeError):
+                    arguments = {}
+                watch.observe(name, result, arguments, is_connected)
+                if name == "search_watch_findings":
+                    new_urls.update(url for item in result.get("findings", []) for url in item["evidence"])
+                elif name == "observe_watch_subject":
+                    new_urls.update(url for line in result.get("lines", []) for url in line.get("evidence", []))
             program_caller = caller and caller["type"] == "program"
             cited_evidence.remember_lines(new_source_lines, tool_label, result)
             new_urls.update(cited_evidence.disclosed_sources(tool_label, result))

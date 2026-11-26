@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Watches · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('index') }}">← Assignments</a>
+<section class="panel">
+  <h1>Watches</h1>
+  {% if watches %}
+  <ul class="entries">
+  {% for watch in watches %}
+    <li><a href="{{ url_for('watch_detail', watch_id=watch.id) }}">{{ watch.request|truncate(110) }}</a>
+      <span>{{ "Stopped" if watch.stopped_at is not none else "Next check " ~ watch.next_run_at|watch_time }}</span></li>
+  {% endfor %}
+  </ul>
+  {% else %}
+  <p>No watches yet. Create one to hear about changes that matter to you.</p>
+  {% endif %}
+</section>
+<section class="panel" id="new-watch">
+  <h2>New watch</h2>
+  {% if error %}<p class="notice" role="alert">{{ error }}</p>{% endif %}
+  {% if not enabled %}<p class="notice">Configure a model to run watch checks.</p>{% endif %}
+  <form action="{{ url_for('save_watch') }}" method="post" enctype="multipart/form-data" class="responsibility-form">
+    {% if subject_info %}<p>Watching <a href="{{ subject_info.url }}">{{ subject_info.label }}</a></p>{% endif %}
+    {% for key, value in subject.items() %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    <label for="watch-request">What should I watch?</label>
+    <p class="help" id="watch-help">Describe what deserves your attention. Include any sources you want checked.</p>
+    <textarea id="watch-request" name="request" required rows="4" maxlength="{{ max_chars }}" aria-describedby="watch-help">{{ values.get('request', '') }}</textarea>
+    <details{% if values.get('required_urls') %} open{% endif %}>
+      <summary>Require specific public pages</summary>
+      <label for="watch-urls">Pages to open on every check, one URL per line</label>
+      <textarea id="watch-urls" name="required_urls" rows="2">{{ values.get('required_urls', '') }}</textarea>
+    </details>
+    <div class="schedule-fields">
+      <div><label for="watch-frequency">Check</label>
+        <select id="watch-frequency" name="frequency">
+          <option value="daily"{% if values.get('frequency', 'daily') == 'daily' %} selected{% endif %}>Every day</option>
+          {% for day in weekdays %}
+            <option value="{{ loop.index0 }}"{% if values.get('frequency') == loop.index0|string %} selected{% endif %}>Every {{ day }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><label for="watch-time">Pacific time</label>
+        <input id="watch-time" type="time" name="local_time" value="{{ values.get('local_time', '09:00') }}" required>
+      </div>
+    </div>
+    <button type="submit">Create watch</button>
+  </form>
+</section>
+{% endblock %}

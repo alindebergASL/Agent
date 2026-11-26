@@ -33,6 +33,10 @@ a { color: var(--accent); text-underline-offset: .18em; }
 .assignment-nav, .schedule-fields { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
 .schedule-fields select, .schedule-fields input { border: 1px solid #9ca896; border-radius: .4rem; padding: .45rem .65rem; font: inherit; }
 .responsibility-form button { margin-top: .75rem; }
+.watch-controls { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; margin-top: .75rem; }
+.watch-controls .secondary { background: var(--surface); color: var(--accent); }
+.watch-sources { overflow-wrap: anywhere; }
+.turn h3 { font-size: 1.05rem; margin-bottom: .35rem; overflow-wrap: anywhere; }
 .entries { list-style: none; padding: 0; margin: 0; }
 .entries li { border-top: 1px solid var(--line); padding: .5rem 0; overflow-wrap: anywhere; }
 .status { background: #e7edf4; color: #30465c; padding: .15rem .55rem; border-radius: .35rem; font-size: .85rem; }

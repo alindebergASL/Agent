@@ -31,3 +31,27 @@ To check the experiment wiring without an API credential, run the fixture.
 ```bash
 docker compose -p agent-knowledge-eval run --rm --build --no-deps app python -m tests.method_policy_eval --fixture --repeats 2 > method-policy-fixture.json
 ```
+
+## How many method summaries should arrive before the first action?
+
+This optional experiment compares an initial page of 1, 3, or 8 relevance-ranked method summaries with the production byte-limited page. All four arms see the same five scenarios, source files, model instructions, and ranking. The catalog includes additional branch-specific procedures so each size exposes a different number of summaries. The model can page through the remaining methods in every arm. The report records initial IDs, further pages read, procedure reads, grounded decisions, and tokens. Compare decision quality and effort together before choosing a limit.
+
+```bash
+docker compose -p agent-knowledge-eval run --rm --build --no-deps app python -m tests.method_policy_eval --live --compare-prefixes --repeats 2 > method-prefix-live.json
+```
+
+With two repeats this runs 40 assignments. Substitute `--fixture` to check the experimental wiring offline. Run without `--compare-prefixes` to use the original corpus and recent-eight comparison.
+
+## Does surfacing a project claim change the decision?
+
+A separate paired evaluation sends a fresh assignment to the ordinary worker with no upload and no instruction to recall a project note. Each request asks for a receiving slip containing a desk code and the exact supporting source line. The two archives use different desks. One archive later authorizes an exception for cobalt-sealed crates. Four cases cover the original rule, the same request after the amendment, a crate outside the exception, and a similar facility with a different rule.
+
+For each pair, the two arms start with copies of the same seeded volume, source URLs and note revisions. The two arms receive identical system instructions and have access to the same tools. The on-demand arm receives an empty memory preview and can search notes or reopen evidence. The proactive arm receives the populated pre-action preview. Order alternates across cases and repeats. The scorer measures whether the controlling claim appeared in the initial context, whether the agent actually read the source line, whether its desk code was correct, and whether the citation resolves to that exact original line. The report includes the slip, observed provider model and token usage. A model that finds a note but selects the wrong desk fails the action check.
+
+From the PR checkout on EC2, run the paired live comparison with the existing app development credential. The one-off container uses temporary evaluation data.
+
+```bash
+docker compose -p agent-watch-memory-eval run --rm --build --no-deps app python -m tests.project_memory_eval --live --repeats 2 > project-memory-live.json
+```
+
+For a local wiring check, replace `--live` with `--fixture`. There are 16 assignments with two repeats. The four cases exercise the use of known, named project scopes and exact source history. Measuring the best preview size or success on unfamiliar projects requires separate trials. Report action correctness and citation accuracy separately, even if both arms perform equally well.

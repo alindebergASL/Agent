@@ -53,6 +53,10 @@ def schemas(tool):
 
 
 INSTRUCTIONS = (
+    " When the user asks to remember evidence-backed guidance across assignments or to maintain a shared "
+    "account or project note, read_project_note for that scope (revision zero starts a new note), then "
+    "use stage_project_note. A standalone Markdown file serves a one-off brief. Verify the requested "
+    "shared note has a successful staging receipt before reporting the update. "
     " For an ongoing account or project decision, search shared project notes by scope and read the matching note. "
     "Treat the note as a dated account. Compare its cited grounds with the relevant original evidence. "
     "When maintaining a note, keep unaffected claims and source URLs. If new evidence changes a claim, "
