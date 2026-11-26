@@ -2,7 +2,7 @@
 
 import json
 
-from .cited_evidence import line_source_urls
+from .cited_evidence import line_source_urls, line_suffix
 from .project_notes import clean_scope
 
 
@@ -61,8 +61,9 @@ INSTRUCTIONS = (
     "Treat the note as a dated account. Compare its cited grounds with the relevant original evidence. "
     "When maintaining a note, keep unaffected claims and source URLs. If new evidence changes a claim, "
     "explain why, identify the earlier claim number in supersedes, and cite the new source beside the changed claim. "
-    "Use each original upload's ../uploads/encoded-name#LN, prior file's revision_url#LN, "
+    "For plain text use the original upload's ../uploads/encoded-name#LN, prior file's revision_url#LN, "
     "saved artifact's ../artifacts/name?revision=N#LN, or a connected tool's evidence_url. "
+    "Use the exact evidence_url on a PDF line, including its physical page and line. "
     "To explain an earlier conclusion, use read_project_note_revision with the previous revision number. "
     "Use separate responses to read the note and sources before staging. Historical note revisions remain accessible."
 )
@@ -86,7 +87,7 @@ def delivered_evidence(history, scope, revision):
                 sources.update(claim["sources"])
         if result.get("lines"):
             for prefix in line_source_urls(name, result):
-                sources.update(f"{prefix}#L{line['number']}" for line in result["lines"])
+                sources.update(prefix + line_suffix(line) for line in result["lines"] if line.get("has_text") is not False)
                 if result.get("revision") is not None and len(result["lines"]) == result["total_lines"]:
                     sources.add(prefix)
         if name == "read_cited_evidence" and result.get("source_url") and "data" in result:

@@ -33,11 +33,11 @@ def evidence_label(source):
         return f"Project note {note[1]} · revision {note[2]}" + (f" · claim {note[3]}" if note[3] else "")
     local = LOCAL_SOURCE.fullmatch(source)
     if local:
-        _, kind, encoded, revision, line = local.groups()
+        _, kind, encoded, revision, page, line = local.groups()
         if kind == "evidence":
             return "Source snapshot " + encoded[:8]
         name = unquote(encoded)
-        return name + (f" · revision {revision}" if revision else "") + (f" · line {line}" if line else "")
+        return name + (f" · revision {revision}" if revision else f" · page {page}" if page else "") + (f" · line {line}" if line else "")
     if any(ord(c) <= 32 for c in source) or "\\" in source:
         return None
     try:

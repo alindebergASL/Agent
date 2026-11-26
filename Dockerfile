@@ -4,6 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-urw-base35 util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN --mount=type=secret,id=pip_cert \
     if [ -f /run/secrets/pip_cert ]; then export PIP_CERT=/run/secrets/pip_cert; fi \

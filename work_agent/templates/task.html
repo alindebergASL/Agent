@@ -37,7 +37,7 @@
     {% if turn.error %}<p class="notice"{% if loop.last %} role="alert"{% endif %}>{{ turn.error }}</p>{% endif %}
     {% if turn.response %}
     <h3>{{ "Question" if turn.status in ("waiting", "stopped") else "Result" }}</h3>
-    <p class="prose">{{ turn.response }}</p>
+    <div class="artifact-markdown">{{ turn.response | assignment_markdown(task.id) | safe }}</div>
     {% endif %}
   </div>
   {% endfor %}
@@ -105,7 +105,8 @@
     <label for="follow-up">{{ "Your answer" if waiting else "Follow-up request" }}</label>
     <textarea id="follow-up" name="request" rows="5" maxlength="8000"{% if not waiting %} required{% endif %}>{{ draft }}</textarea>
     <label for="files">Additional supporting files</label>
-    <input id="files" name="files" type="file" multiple>
+    {% include "upload_help.html" %}
+    <input id="files" name="files" type="file" multiple aria-describedby="file-help">
     <button type="submit"{% if not follow_up_enabled %} disabled{% endif %}>{{ "Send answer" if waiting else "Send follow-up" }}</button>
   </form>
 </section>

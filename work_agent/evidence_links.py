@@ -1,13 +1,11 @@
 """Derived relationships between immutable files and published Markdown revisions."""
 
 import json
-import re
 from urllib.parse import quote
 
-from .artifact_preview import file_citation, markdown_preview
+from .artifact_preview import FILE_CITATION, PRIOR_CITATION, file_citation, markdown_preview
 
 
-PRIOR_CITATION = re.compile(r"\.\./prior-artifacts/([1-9][0-9]{0,18})(?:#L([1-9][0-9]{0,6}))?")
 PAGE_SIZE = 20
 
 
@@ -70,12 +68,22 @@ def _source_length(connection, upload_bytes, target):
             WHERE task_id=? AND name=? AND revision=?""", target).fetchone()
         data = row[0] if row else None
     else:
+        last_page = connection.execute("""SELECT end_line FROM pdf_upload_pages
+            WHERE task_id=? AND name=? ORDER BY number DESC LIMIT 1""", (task_id, name)).fetchone()
+        if last_page:
+            return last_page[0]
         row = connection.execute("SELECT content, position FROM uploads WHERE task_id=? AND name=?", (task_id, name)).fetchone()
         try:
             data = upload_bytes(task_id, row) if row else None
         except FileNotFoundError:
             return None
     return len(data.decode("utf-8").splitlines()) if data is not None else -1
+
+
+def physical_pdf_page(connection, task, name, line):
+    """Return the physical page and text availability at an upload's global line."""
+    return connection.execute("""SELECT number, text!='' AS has_text FROM pdf_upload_pages
+        WHERE task_id=? AND name=? AND ? BETWEEN start_line AND end_line""", (task, name, line)).fetchone()
 
 
 def index_report(connection, upload_bytes, task_id, name, revision, content):
@@ -95,14 +103,21 @@ def index_report(connection, upload_bytes, task_id, name, revision, content):
                 source_task, source_name, source_revision, source_line = direct
                 target = (source_task or task_id, source_name, source_revision or 0)
                 line = source_line or 0
-            elif prior and int(prior[1]) <= 2**63 - 1:
+                page = FILE_CITATION.fullmatch(href)["page"]
+            elif prior and int(prior["reference"]) <= 2**63 - 1:
                 row = connection.execute("""SELECT source_task_id, name, COALESCE(revision, 0) FROM prior_artifacts
-                    WHERE task_id=? AND reference_id=?""", (task_id, int(prior[1]))).fetchone()
+                    WHERE task_id=? AND reference_id=?""", (task_id, int(prior["reference"]))).fetchone()
                 if row is None:
                     continue
                 target = tuple(row)
-                line = int(prior[2] or 0)
+                line = int(prior["line"] or 0)
+                page = prior["page"]
             else:
+                continue
+            physical = physical_pdf_page(connection, *target[:2], line) if line and not target[2] else None
+            if physical and not physical["has_text"]:
+                continue
+            if page and (not physical or physical["number"] != int(page)):
                 continue
             if target not in lengths:
                 lengths[target] = _source_length(connection, upload_bytes, target)
@@ -158,7 +173,7 @@ def record_read(connection, task_id, turn_id, step, step_id):
             WHERE task_id=? AND reference_id=? AND name=?""", (task_id, args["reference_id"], name)).fetchone()
     elif call.get("name") == "read_cited_evidence":
         requested = args.get("source_url")
-        if not isinstance(requested, str) or requested.partition("#")[0] != result.get("source_url"):
+        if not isinstance(requested, str) or requested.partition("#")[0].partition("?page=")[0] != result.get("source_url"):
             return
         citation = file_citation(requested)
         if not citation or citation[:3] != (result.get("source_task_id"), name, result.get("revision")):
@@ -243,8 +258,10 @@ def uses(connection, task_id, name, revision, offset=0):
             (SELECT MAX(revision) FROM project_note_revisions x WHERE x.note_id=n.id), c.claim_index
         FROM note_claim_citations c JOIN project_notes n ON n.id=c.note_id
         JOIN project_note_revisions r ON r.note_id=n.id AND r.revision=c.revision
-        WHERE c.source_base=? ORDER BY n.id, r.revision DESC, c.claim_index LIMIT ? OFFSET ?""",
-        (source_base, PAGE_SIZE + 1, offset)).fetchall()
+        WHERE c.source_base IN (SELECT ? UNION ALL SELECT ?||'?page='||number FROM pdf_upload_pages
+                WHERE task_id=? AND name=? AND ? IS NULL)
+        GROUP BY n.id,r.revision,c.claim_index ORDER BY n.id, r.revision DESC, c.claim_index LIMIT ? OFFSET ?""",
+        (source_base, source_base, task_id, name, revision, PAGE_SIZE + 1, offset)).fetchall()
     claims = [{"note_id": n[0], "scope": n[1], "revision": n[2], "reason": n[3],
                "claim": json.loads(n[4]), "current_revision": n[5],
                "note_url": f"/notes/{n[0]}?revision={n[2]}#claim-{n[6]+1}"} for n in notes[:PAGE_SIZE]]

@@ -43,6 +43,16 @@ class ArtifactPreviewTests(unittest.TestCase):
         self.store.complete(task_id, "Saved.")
         return f"/tasks/{task_id}/artifacts/{name}"
 
+    def test_assignment_result_links_resolve_to_this_tasks_uploads(self):
+        task_id = self.store.submit("Read the observation.", {"obs.txt": b"First\nSecond\n"})
+        self.assertEqual(self.store.claim(), task_id)
+        self.store.complete(task_id, "See [observation](../uploads/obs.txt#L2).\n\n<script>example</script>")
+        html = self.client.get(f"/tasks/{task_id}").text
+        link = f"/tasks/{task_id}/uploads/obs.txt#L2"
+        self.assertIn(link, [attrs.get("href") for tag, attrs in PreviewMarkup(html).elements if tag == "a"])
+        self.assertIn('id="L2"', self.client.get(link).text)
+        self.assertIn("&lt;script&gt;example&lt;/script&gt;", html)
+
     def test_markdown_preview_links_citations_and_keeps_download_bytes(self):
         citation = "https://ai.uiowa.edu/university-supported-ai-tools"
         reference = "http://example.org/handbook?section=ai&year=2026"

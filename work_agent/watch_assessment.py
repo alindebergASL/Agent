@@ -4,7 +4,7 @@ import json
 import re
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from .cited_evidence import line_source_urls
+from .cited_evidence import line_source_urls, line_suffix
 
 
 INSTRUCTIONS = (
@@ -160,7 +160,9 @@ class WatchAssessment:
             kind = "uploads" if rev is None else "artifacts"
             base = f"/tasks/{owner}/{kind}/{quote(result['file_id'], safe='')}" + (f"?revision={rev}" if rev else "")
             for line in result["lines"]:
-                suffix = f"#L{line['number']}"
+                if line.get("has_text") is False:
+                    continue
+                suffix = line_suffix(line)
                 target = base + suffix
                 self.aliases[target] = target
                 for prefix in line_source_urls(tool, result):

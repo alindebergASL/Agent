@@ -48,7 +48,7 @@
     <label for="request">What would you like done?</label>
     <textarea id="request" name="request" rows="6" maxlength="8000" required>{{ draft }}</textarea>
     <label for="files">Supporting files</label>
-    <p class="help" id="file-help">Up to 8 UTF-8 text files, 128 KiB each.</p>
+    {% include "upload_help.html" %}
     <input id="files" name="files" type="file" multiple aria-describedby="file-help">
     <button type="submit"{% if not enabled %} disabled{% endif %}>Start assignment</button>
   </form>

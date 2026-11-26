@@ -2,11 +2,13 @@
 
 Start a fresh assignment with a request such as “Find my last University of Iowa meeting brief and check what has changed.” Work Agent searches the full text of original uploads and the latest published revision of each generated file in its single-user workspace. A filename, a phrase from the assignment, an identifier, or a phrase from the middle of a document can locate a file.
 
-A matching passage includes its physical source lines and an excerpt. CSV records retain their column headings and quoted multiline ranges. Markdown passages retain their section headings. The agent opens a candidate and reads the numbered original lines before citing it.
+A matching passage includes its physical source lines and an excerpt. CSV records retain their column headings and quoted multiline ranges. Markdown passages retain their section headings. Searchable PDFs retain their physical page numbers, so each match can open the page as it was uploaded. The agent opens a candidate and reads the numbered original lines before citing it.
 
 The SQLite index combines exact filename and keyword matches with contextual similarity. For example, two documents that use *shipping* and *freight* can match when both terms occur alongside similar language. The model may also supply up to three paraphrases in one search. An exact identifier such as `000731` is searchable with its leading zeros. Indexing and ranking run locally on the app's data volume. Selected passages are returned to the assignment's model. Existing volumes are indexed at startup, and a new publication or edit is indexed for the next search.
 
 The agent can narrow a search or ask which assignment you meant. Opening a result pins the revision that appeared in the search. You can also choose **Start an assignment with this revision** from a current or historical file. Follow the new report's citation back to the saved revision. Citations to CSV lines can take you directly to the cited row.
+
+For a current or selected PDF, the agent can search within that document or jump directly to a physical page. A page citation identifies the original upload, physical page number, and extracted line. If an earlier installation accepted an ASCII-encoded PDF as plain text, its existing line references still identify the original text view. Attach that PDF in a new assignment to get page-aware search and citations.
 
 ## Try it on an isolated EC2 deployment
 

@@ -53,3 +53,7 @@ li + li { margin-top: .2rem; }
 .source-lines li { display: grid; grid-template-columns: 7ch minmax(max-content, 1fr); gap: .75rem; margin: 0; padding-inline: .75rem; }
 .source-lines li:target { background: #e0e9df; }
 .source-lines code { white-space: pre; }
+
+.pdf-page { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); }
+.pdf-page-index { columns: 12rem; list-style: none; padding: 0; }
+.pdf-page-index li { break-inside: avoid; }
