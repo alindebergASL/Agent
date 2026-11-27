@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .methods import initialize_method_search, ranked_methods
 from . import memory_context, project_notes
-from . import evidence_changes, evidence_links
+from . import evidence_changes, evidence_links, repair_proposals
 from . import office_documents, passages, pdf_documents, watch_history, watch_subjects, watches
 from .scheduling import latest_occurrence, next_occurrence, parse_schedule_time, scheduled_request
 
@@ -169,7 +169,8 @@ class InactiveTurn(RuntimeError):
     """The worker's turn is no longer the active running turn."""
 
 
-class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore, watches.WatchStore):
+class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore, watches.WatchStore,
+            repair_proposals.RepairProposalStore):
     def __init__(self, root: Path):
         self.root = Path(root)
 
@@ -193,7 +194,8 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version < SCHEMA_VERSION:
                 self._upgrade_turn_schema(connection)
-            for statement in (SCHEMA + project_notes.SCHEMA + evidence_changes.SCHEMA + watches.SCHEMA).split(";"):
+            schema = SCHEMA + project_notes.SCHEMA + evidence_changes.SCHEMA + watches.SCHEMA + repair_proposals.SCHEMA
+            for statement in schema.split(";"):
                 if statement.strip():
                     connection.execute(statement)
             if version < SCHEMA_VERSION:
@@ -261,6 +263,8 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                 (INTERRUPTED,),
             )
             connection.execute("""DELETE FROM evidence_changes WHERE published=0 AND turn_id IN
+                               (SELECT id FROM turns WHERE status='interrupted')""")
+            connection.execute("""DELETE FROM repair_proposals WHERE published=0 AND turn_id IN
                                (SELECT id FROM turns WHERE status='interrupted')""")
             for table in ("staged_artifacts", "staged_methods", "staged_project_notes", "staged_watch_assessments"):
                 connection.execute(
@@ -1099,6 +1103,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
         connection.execute("DELETE FROM staged_watch_assessments WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM staged_project_notes WHERE turn_id = ?", (turn_id,))
         connection.execute("DELETE FROM evidence_changes WHERE turn_id=? AND published=0", (turn_id,))
+        connection.execute("DELETE FROM repair_proposals WHERE turn_id=? AND published=0", (turn_id,))
 
     def progress(self, task_id: str, message: str, *, turn_id: int | None = None) -> None:
         with self._connection() as connection:
@@ -1244,6 +1249,7 @@ class Store(project_notes.ProjectNoteStore, evidence_changes.EvidenceChangeStore
                 connection.execute("UPDATE evidence_changes SET published=1 WHERE turn_id=?", (active,))
             except project_notes.NoteConflict as exc:
                 raise RevisionConflict(str(exc)) from exc
+            connection.execute("UPDATE repair_proposals SET published=1 WHERE turn_id=?", (active,))
             self._discard_drafts(connection, active)
             connection.execute(
                 "UPDATE turns SET status = 'completed', response = ? WHERE id = ?", (response, active)

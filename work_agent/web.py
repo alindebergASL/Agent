@@ -118,6 +118,7 @@ def work_pending(store, model, wake, stop, turn_lock, clock, sources=None):
                         project_note_store=store,
                         task_id=task_id,
                         stage_project_note=lambda **fields: store.stage_project_note(task_id, turn_id, **fields),
+                        stage_repair_proposal=lambda **fields: store.stage_repair_proposal(task_id, turn_id, **fields),
                         connected_catalog=catalog,
                         watch_context=watch,
                         search_watch_findings=(lambda query, offset: watch_history.search(store, task_id, query, offset))
@@ -536,6 +537,16 @@ def create_app(data_dir: Path | None = None, model=None, *, clock=utc_now) -> Fa
         if history is None:
             raise HTTPException(404, "Assignment not found.")
         return JSONResponse(history, headers={"Cache-Control": "no-store"})
+
+    @app.get("/repair-proposals")
+    def repair_proposals(request: Request, offset: Annotated[int, Query(ge=0, le=MAX_RECORD_NUMBER)] = 0):
+        page_size = 20
+        proposals = store.list_repair_proposals(offset=offset, limit=page_size + 1)
+        return templates.TemplateResponse(
+            request=request, name="repair_proposals.html",
+            context={"proposals": proposals[:page_size], "offset": offset, "page_size": page_size,
+                     "has_more": len(proposals) > page_size},
+        )
 
     @app.get("/methods")
     def methods(request: Request):
