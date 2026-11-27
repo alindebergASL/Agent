@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Repair proposals · Work Agent{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('index') }}">← Assignments</a>
+<section class="panel">
+  <h1>Repair proposals</h1>
+  {% for proposal in proposals %}
+  <article class="turn" id="turn-{{ proposal.turn_id }}">
+    <h2>{{ proposal.problem }}</h2>
+    <dl>
+      {% for label, value in [
+        ('How to reproduce', proposal.reproduction), ('Workaround', proposal.workaround),
+        ('Proposed change', proposal.proposed_change), ('How to verify', proposal.verification)
+      ] %}
+      <dt><strong>{{ label }}</strong></dt>
+      <dd class="prose">{{ value }}</dd>
+      {% endfor %}
+    </dl>
+    <h3>Observed tool errors</h3>
+    <ul>
+      {% for receipt in proposal.evidence %}
+      <li><code>{{ receipt.tool }}</code> · <code>{{ receipt.call_id }}</code>
+        <div class="prose">{{ receipt.error }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    <a href="{{ url_for('assignment', task_id=proposal.task_id) }}">Assignment</a> ·
+    <a href="{{ url_for('run_history', task_id=proposal.task_id) }}">Run history (JSON)</a>
+  </article>
+  {% else %}
+  <p>{% if offset %}No more repair proposals.{% else %}No repair proposals have been published.{% endif %}</p>
+  {% endfor %}
+  {% if offset or has_more %}
+  <nav class="assignment-nav" aria-label="Repair proposal pages">
+    {% if offset %}<a href="?offset={{ [0, offset - page_size]|max }}">Newer proposals</a>{% endif %}
+    {% if has_more %}<a href="?offset={{ offset + page_size }}">Older proposals</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}

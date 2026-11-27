@@ -3,6 +3,7 @@ import json
 import operator
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from decimal import Decimal, DecimalException, localcontext
@@ -13,12 +14,16 @@ from openai import APIError, OpenAI
 from .methods import method_page
 from .calculation_evidence import CONDITION_PROPERTIES, INPUT_PROPERTIES, calculate_with_evidence
 from . import cited_evidence, evidence_changes, memory_context, note_tools
-from . import watch_assessment
+from . import repair_proposals, watch_assessment
 from .research import WEB_SEARCH_TOOL, web_search_observations
 
 
 class AssignmentError(Exception):
     """An assignment failure with a message suitable for the task page."""
+
+
+class InvalidToolArguments(ValueError):
+    """The tool cannot operate on the supplied arguments."""
 
 
 class NeedsUserInput(Exception):
@@ -288,6 +293,30 @@ STAGE_RECOVERY_METHOD = _tool(
         "corrected_artifact": {"type": "string", "description": "Exact filename of the staged corrected artifact."},
     },
 )
+
+
+def _repair_proposal_tool(call_ids):
+    return _tool(
+        "stage_repair_proposal",
+        "If a repeated application defect or limitation obstructed this assignment, stage one local "
+        "repair proposal for the maintainer. Cite two observed failures of the same tool. "
+        "Finish the user's work first where possible. Ordinary input mistakes, missing data and "
+        "service outages do not warrant proposals. Never repeat an action solely to qualify. "
+        "The proposal is published locally when the turn completes.",
+        {
+            "problem": {"type": "string", "description": "What failed and how it affected the assignment."},
+            "reproduction": {"type": "string", "description": "Smallest steps and input shape that reproduced it."},
+            "workaround": {"type": "string", "description": "What let work proceed, or state that none is known."},
+            "proposed_change": {"type": "string", "description": "Suggested change to Work Agent."},
+            "verification": {"type": "string", "description": "Observable behavior that would confirm a fix."},
+            "call_ids": {
+                "type": "array", "items": {"type": "string", "enum": list(call_ids)},
+                "description": "Two distinct call IDs for the same tool in this turn.",
+            },
+        },
+    )
+
+
 NOTE_TOOLS = note_tools.schemas(_tool)
 READ_CITED = _tool(
     "read_cited_evidence", "Open an exact workspace source URL returned by a project note, evidence "
@@ -330,7 +359,7 @@ SEARCH_PDF_PAGES = _tool(
     {"source": PDF_SOURCE, "query": {"type": "string", "description": "Specific words to find."},
      "offset": {"type": "integer", "description": "Use 0 initially or a returned next_offset."}},
 )
-TOOL_NAMES = NOTE_TOOL_NAMES | {"stage_evidence_change", "read_cited_evidence", "stage_watch_assessment",
+TOOL_NAMES = NOTE_TOOL_NAMES | {"stage_repair_proposal", "stage_evidence_change", "read_cited_evidence", "stage_watch_assessment",
                                 "observe_watch_subject", "search_watch_findings"} | {
     tool["name"] for tool in (*TOOLS, READ_SAVED_ARTIFACT, READ_PRIOR_ARTIFACT, SEARCH_SAVED_WORK,
                               OPEN_SAVED_WORK, FIND_EVIDENCE_USES, READ_METHOD, LIST_MORE_METHODS, STAGE_RECOVERY_METHOD,
@@ -420,7 +449,7 @@ def _calculate(expression: str, variables: dict[str, Decimal] | None = None) -> 
         elif isinstance(node, ast.UnaryOp) and type(node.op) in OPERATORS:
             value = OPERATORS[type(node.op)](evaluate(node.operand))
         else:
-            raise ValueError("Use only decimal numbers and arithmetic operators +, -, *, and /.")
+            raise InvalidToolArguments("Use only decimal numbers and arithmetic operators +, -, *, and /.")
         if not value.is_finite() or value.copy_abs() > Decimal("1e18"):
             raise ValueError("Arithmetic values must be finite and within 1e18 in magnitude.")
         if value and value.adjusted() < -28:
@@ -432,19 +461,19 @@ def _calculate(expression: str, variables: dict[str, Decimal] | None = None) -> 
             context.prec = 28
             result = evaluate(ast.parse(expression, mode="eval").body)
             if variables is not None and used != variables.keys():
-                raise ValueError("Use every bound input in the calculation.")
+                raise InvalidToolArguments("Use every bound input in the calculation.")
     except (SyntaxError, DecimalException) as exc:
-        raise ValueError("Invalid arithmetic expression or division by zero.") from exc
+        raise InvalidToolArguments("Invalid arithmetic expression or division by zero.") from exc
     return format(result, "f") if result else "0"
 
 
 def _read_file(uploads: Mapping[str, str], file_id: str, start_line: int, line_count: int):
     if not isinstance(file_id, str) or file_id not in uploads:
-        raise ValueError("Choose a file ID from uploaded_files.")
+        raise InvalidToolArguments("Choose a file ID from uploaded_files.")
     if type(start_line) is not int or start_line < 1:
-        raise ValueError("start_line must be a positive integer.")
+        raise InvalidToolArguments("start_line must be a positive integer.")
     if type(line_count) is not int or not 1 <= line_count <= 100:
-        raise ValueError("line_count must be an integer from 1 to 100.")
+        raise InvalidToolArguments("line_count must be an integer from 1 to 100.")
     lines = uploads[file_id].splitlines()
     result = []
     remaining = 16_000
@@ -569,7 +598,7 @@ def _dispatch(
     if connected_read is not None:
         return connected_read(name, arguments)
     if (call.get("caller") or {}).get("type") == "program" and name not in PROGRAM_TOOLS:
-        return {"error": "Call this tool directly outside the hosted program."}
+        return {"error_kind": "invalid_arguments", "error": "Call this tool directly outside the hosted program."}
     try:
         if name == "request_user_input" and arguments.keys() == {"question"}:
             question = arguments["question"]
@@ -587,7 +616,7 @@ def _dispatch(
         if name == "read_saved_artifact" and arguments.keys() == {"name", "start_line", "line_count"}:
             filename = arguments["name"]
             if not isinstance(filename, str) or filename not in saved_artifacts or read_saved_artifact is None:
-                raise ValueError("Choose a name from saved_artifacts.")
+                raise InvalidToolArguments("Choose a name from saved_artifacts.")
             return _revision_page(
                 filename, saved_artifacts[filename], read_saved_artifact(filename),
                 arguments["start_line"], arguments["line_count"],
@@ -611,7 +640,7 @@ def _dispatch(
             method_id = arguments["method_id"]
             method = read_indexed_method(method_id) if type(method_id) is int else None
             if method is None:
-                raise ValueError("Choose an available method ID from saved_methods.")
+                raise InvalidToolArguments("Choose an available method ID from saved_methods.")
             return method
         if name == "stage_recovery_method" and arguments.keys() == STAGE_RECOVERY_METHOD["parameters"]["properties"].keys():
             if stage_recovery_method is None:
@@ -630,7 +659,7 @@ def _dispatch(
         if name == "write_artifact" and arguments.keys() == {"name", "content"}:
             filename, content = arguments["name"], arguments["content"]
             if not isinstance(filename, str) or not isinstance(content, str):
-                raise ValueError("Artifact name and content must be text.")
+                raise InvalidToolArguments("Artifact name and content must be text.")
             if filename in saved_artifacts and filename not in fully_read:
                 raise ValueError(
                     "Read every line of the saved revision directly with read_saved_artifact, "
@@ -642,9 +671,11 @@ def _dispatch(
                 "next_step": "Check which requested deliverables are still missing. "
                 "Stage any remaining files before replying.",
             }
+    except InvalidToolArguments as exc:
+        return {"error_kind": "invalid_arguments", "error": str(exc)}
     except ValueError as exc:
         return {"error": str(exc)}
-    return {"error": "Use an available tool and pass its required parameters."}
+    return {"error_kind": "invalid_arguments", "error": "Use an available tool and pass its required parameters."}
 
 
 def run_assignment(
@@ -673,6 +704,7 @@ def run_assignment(
     project_note_store=None,
     task_id: str | None = None,
     stage_project_note=None,
+    stage_repair_proposal: Callable[..., dict] | None = None,
     change_tracker: evidence_changes.AssignmentEvidenceChanges | None = None,
     watch_context=None,
     search_watch_findings=None,
@@ -698,7 +730,7 @@ def run_assignment(
 
     def list_methods_page(offset):
         if type(offset) is not int or offset not in available_offsets:
-            raise ValueError("Choose a next_method_offset returned by an earlier page.")
+            raise InvalidToolArguments("Choose a next_method_offset returned by an earlier page.")
         page = method_page(methods, offset)
         method_ids.update(m["id"] for m in page["saved_methods"])
         if "next_method_offset" in page:
@@ -771,7 +803,7 @@ def run_assignment(
     def read_prior_page(reference_id: int, start_line: int, line_count: int) -> dict:
         reference = references.get(reference_id) if type(reference_id) is int and reference_id in delivered_refs else None
         if reference is None or read_prior_artifact is None:
-            raise ValueError("Choose a reference ID from prior_artifacts.")
+            raise InvalidToolArguments("Choose a reference ID from prior_artifacts.")
         return _revision_page(
             reference["name"], reference, read_prior_artifact(reference_id), start_line, line_count
         )
@@ -783,13 +815,13 @@ def run_assignment(
             ref = references[source]
             owner, name, layout = ref["source_task_id"], ref["name"], ref["pdf_pages"]
         else:
-            raise ValueError("Choose an uploaded PDF filename or a selected PDF reference ID.")
+            raise InvalidToolArguments("Choose an uploaded PDF filename or a selected PDF reference ID.")
         if search is not None:
             if search_pdf_pages is None:
                 raise ValueError("Searching PDF pages is unavailable.")
             return search_pdf_pages(owner, name, *search)
         if type(page) is not int or not 1 <= page <= len(layout):
-            raise ValueError(f"Choose a physical PDF page between 1 and {len(layout)}.")
+            raise InvalidToolArguments(f"Choose a physical PDF page between 1 and {len(layout)}.")
         return {"source": source, "page_count": len(layout), **layout[page - 1]}
 
     def register_candidate(source_task_id, name, revision):
@@ -802,11 +834,11 @@ def run_assignment(
         if not discovery_enabled:
             raise ValueError("Saved work search is unavailable.")
         if kind not in ("any", "upload", "artifact"):
-            raise ValueError("Choose any, upload, or artifact for the file kind.")
+            raise InvalidToolArguments("Choose any, upload, or artifact for the file kind.")
         if not isinstance(paraphrases, list) or len(paraphrases) > 3 or any(
             not isinstance(phrase, str) or not 1 <= len(phrase.strip()) <= 200 for phrase in paraphrases
         ):
-            raise ValueError("Supply up to three short alternative search phrases.")
+            raise InvalidToolArguments("Supply up to three short alternative search phrases.")
         if paraphrases:
             results = search_saved_work(query, kind, paraphrases)
         else:
@@ -831,7 +863,7 @@ def run_assignment(
             valid = (isinstance(filename, str) and filename in saved_artifacts and type(revision) is int
                      and saved_artifacts[filename]["revision"] == revision)
         if not valid or find_evidence_uses is None:
-            raise ValueError("Choose a listed original upload, listed saved revision, or delivered earlier reference ID.")
+            raise InvalidToolArguments("Choose a listed original upload, listed saved revision, or delivered earlier reference ID.")
         result = find_evidence_uses(source, offset)
         indirect = result.get("indirect_review_candidates", [])
         for row in [*result["citing_revisions"], *indirect, *(item["via"] for item in indirect)]:
@@ -848,7 +880,7 @@ def run_assignment(
 
     def open_candidate(candidate_id: int) -> dict:
         if not discovery_enabled or type(candidate_id) is not int or not 1 <= candidate_id <= delivered_candidates:
-            raise ValueError("Choose a candidate_id returned by search_saved_work in this turn.")
+            raise InvalidToolArguments("Choose a candidate_id returned by search_saved_work in this turn.")
         return _reference_summary(remember_reference(*candidates[candidate_id - 1]))
 
     current_request = {"request": request, "uploaded_files": list(uploads)}
@@ -889,6 +921,7 @@ def run_assignment(
         disclosed_urls.update(watch.aliases)
     verified_artifact: str | None = None
     prompted_watch_result = False
+    failed_calls = {}
     for _ in range(16):
         if time.monotonic() >= deadline:
             raise AssignmentError("The assignment reached its time limit.")
@@ -897,6 +930,10 @@ def run_assignment(
         progress("Waiting for the model.")
         delivered = len(history)
         offered_tools = tools + [STAGE_EVIDENCE_CHANGE] if change_tracker and change_tracker.has_two_lines else tools
+        failure_counts = Counter(failed_calls.values())
+        repair_evidence = {cid: name for cid, name in failed_calls.items() if failure_counts[name] >= 2}
+        if repair_evidence:
+            offered_tools = [*offered_tools, _repair_proposal_tool(repair_evidence)]
         response = model.respond(
             history, offered_tools, instructions, max_tool_calls=remaining_calls
         )
@@ -977,6 +1014,21 @@ def run_assignment(
                                             remember_reference if pin_saved_work is not None else None, _revision_page)
 
         def dispatch(call, connected_read=None):
+            if call.get("name") == "stage_repair_proposal":
+                if not repair_evidence or stage_repair_proposal is None:
+                    return {"error": "A proposal requires two previously observed failures from the same tool."}
+                if (call.get("caller") or {}).get("type") == "program":
+                    return {"error": "Call the repair proposal tool directly."}
+                try:
+                    fields = json.loads(call["arguments"])
+                    ids = fields["call_ids"]
+                    if (not isinstance(ids, list) or len(ids) != 2
+                            or any(not isinstance(cid, str) or cid not in repair_evidence for cid in ids)
+                            or ids[0] == ids[1] or repair_evidence[ids[0]] != repair_evidence[ids[1]]):
+                        raise ValueError("Cite two distinct earlier failures from the same tool in this turn.")
+                    return stage_repair_proposal(**fields)
+                except (KeyError, TypeError, ValueError) as exc:
+                    return {"error": str(exc)}
             if watch and call.get("name") == "search_watch_findings" and search_watch_findings:
                 try:
                     args = json.loads(call["arguments"])
@@ -1040,7 +1092,8 @@ def run_assignment(
             with tool_scope():
                 source_ref = None
                 if mixed_question:
-                    result = {"error": "No function in this batch ran. Call request_user_input separately."}
+                    result = {"error_kind": "undispatched",
+                              "error": "No function in this batch ran. Call request_user_input separately."}
                 elif is_connected:
                     if time.monotonic() >= deadline:
                         raise AssignmentError("The assignment reached its time limit.")
@@ -1068,6 +1121,9 @@ def run_assignment(
             history.append(receipt)
             if mixed_question:
                 continue
+            if (stage_repair_proposal is not None and tool_label != "unknown" and not is_connected
+                    and repair_proposals.eligible_failure(tool_label, result)):
+                failed_calls[call["call_id"]] = tool_label
             if tool_label == "request_user_input" and "question" in result:
                 raise NeedsUserInput(result["question"])
             if watch:
