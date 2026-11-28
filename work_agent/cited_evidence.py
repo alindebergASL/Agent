@@ -23,12 +23,27 @@ def line_suffix(line):
 
 
 def remember_lines(receipts, tool, result):
+    if tool == "read_line_range" and result.get("text"):
+        url = result["evidence_url"]
+        segment = {key: result[key] for key in ("text", "start_char", "end_char", "numeric_values")}
+        merge_lines(receipts, {url: (result["file_id"], [segment])})
     if result.get("lines"):
         for url in line_source_urls(tool, result):
             for line in result["lines"]:
                 if line.get("has_text") is False:
                     continue
                 receipts[url + line_suffix(line)] = (result["file_id"], line["text"])
+
+
+def merge_lines(receipts, delivered):
+    """Preserve earlier range receipts at the same line URL, preferring a complete read."""
+    for url, (name, content) in delivered.items():
+        prior = receipts.get(url)
+        if isinstance(content, list) and prior:
+            if isinstance(prior[1], list):
+                receipts[url] = (name, [*prior[1], *(s for s in content if s not in prior[1])])
+        else:
+            receipts[url] = (name, content)
 
 
 def disclosed_sources(tool, result):
@@ -46,7 +61,7 @@ def disclosed_sources(tool, result):
         for entry in result.get("indirect_review_candidates", []):
             links.update((entry["revision_url"], entry["via"]["revision_url"]))
     if tool in {"read_project_note", "find_evidence_uses", "read_file", "read_saved_artifact",
-                "read_prior_artifact", "read_cited_evidence"}:
+                "read_prior_artifact", "read_cited_evidence", "read_line_range"}:
         changes = result.get("evidence_changes", [])
         for row in changes.get("changes", []) if isinstance(changes, dict) else changes:
             links.update((row["new_source"], row["earlier_source"]))

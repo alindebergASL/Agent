@@ -162,30 +162,37 @@ class AssignmentEvidenceChanges:
                              "in the finding, report or project note and explain the change there.")
         if not all(isinstance(url, str) and url in read_lines for url in sources):
             raise ValueError("Read both exact source lines in an earlier response before linking them.")
-        if any(not read_lines[url][1].strip() for url in sources):
-            raise ValueError("Choose source lines containing the passages that changed.")
+        for url in sources:
+            receipt = read_lines[url][1]
+            has_text = receipt.strip() if isinstance(receipt, str) else any(part["text"].strip() for part in receipt)
+            if not has_text:
+                raise ValueError("Choose source lines containing the passages that changed.")
         return self.store.stage_evidence_change(self.task_id, self.turn_id, **arguments)
 
     def annotate(self, tool, result):
         if tool == "read_project_note" and result.get("claims"):
             changes = self.store.changes_for_note_claims(result["claims"])
             return {**result, "evidence_changes": changes} if changes else result
-        if tool not in {"read_file", "read_prior_artifact", "read_saved_artifact", "read_cited_evidence"}:
+        if tool == "read_line_range" and result.get("text"):
+            lines = [{"number": result["number"], "text": result["text"]}]
+        elif tool in {"read_file", "read_prior_artifact", "read_saved_artifact", "read_cited_evidence"}:
+            lines = result.get("lines")
+        else:
             return result
-        if not result.get("lines"):
+        if not lines:
             return result
         # A pinned URL and a canonical URL can refer to the very same line.
         # Retain at most two identities to decide when the model can use the tool.
         if not self.has_two_lines:
             file_identity = (result.get("source_task_id", self.task_id), result["file_id"], result.get("revision"))
-            for line in result["lines"]:
+            for line in lines:
                 if line["text"].strip():
                     self._read_lines.add((*file_identity, line["number"]))
                     if self.has_two_lines:
                         break
         page = self.store.evidence_changes(
             result.get("source_task_id", self.task_id), result["file_id"], result.get("revision"),
-            start_line=result["lines"][0]["number"], end_line=result["lines"][-1]["number"],
+            start_line=lines[0]["number"], end_line=lines[-1]["number"],
         )
         if page["changes"]:
             return {**result, "evidence_changes": page}

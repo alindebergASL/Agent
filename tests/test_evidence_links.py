@@ -81,6 +81,23 @@ or [another](../uploads/missing#L2).
             self.assertIn("Approval is required.", html)
             self.assertEqual(browser.get(f"/tasks/{source}/evidence-uses/artifact/terms.csv?revision=9").status_code, 404)
 
+    def test_range_read_records_exact_pinned_source_without_claiming_a_citation(self):
+        original = self.store.submit("Archive records.", {"records.txt": b"Old record."})
+        self.store.claim()
+        self.store.complete(original, "Archived.")
+        task = self.store.submit("Compare records.", {"records.txt": b"New record."},
+                                 prior_revision=(original, "records.txt", None))
+        self.store.claim()
+        ref = self.store.get_task(task)["prior_artifacts"][0]["reference_id"]
+        self.store.record_step(task, {"type": "response", "response": response(
+            call("slice", "read_line_range", source=ref, line_number=1, start_char=0, char_count=3))})
+        self.store.record_step(task, {"type": "function_call_output", "call_id": "slice", "output": json.dumps(
+            {"file_id": "records.txt", "number": 1, "text": "Old", "evidence_url": f"../prior-artifacts/{ref}#L1"})})
+        trace = self.store.evidence_uses(original, "records.txt", None)
+        self.assertEqual(trace["related_assignments"], [{"task_id": task, "pinned": True, "read": True}])
+        self.assertEqual(trace["citing_revisions"], [])
+        self.assertEqual(self.store.evidence_uses(task, "records.txt", None)["related_assignments"], [])
+
     def test_missing_legacy_upload_is_indexed_only_when_the_original_returns(self):
         original = self.store.submit("Summarize policy", {"policy.txt": b"scope\nOriginal condition."})
         self.store.claim()

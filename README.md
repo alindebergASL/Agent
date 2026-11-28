@@ -167,4 +167,4 @@ Excel shows stored values, cell types, number formats, and formula expressions. 
 
 ### Repair proposals
 
-Open **Repair proposals** from the dashboard to review application improvements suggested during completed assignments. Each entry describes the observed problem, how to reproduce it, the workaround, the proposed change, and how to verify it. The two failed calls and the original run history are available for inspection. [Try the live acceptance case](docs/repair-proposals.md).
+Open **Repair proposals** from the dashboard to review application improvements suggested during completed assignments. Each entry describes the observed problem, how to reproduce it, the workaround, the proposed change, and how to verify it. The two failed calls and the original run history are available for inspection. [Verify the first proposed repair on two long records](docs/repair-proposals.md#verify-the-long-line-repair).

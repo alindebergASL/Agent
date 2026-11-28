@@ -90,6 +90,8 @@ def delivered_evidence(history, scope, revision):
                 sources.update(prefix + line_suffix(line) for line in result["lines"] if line.get("has_text") is not False)
                 if result.get("revision") is not None and len(result["lines"]) == result["total_lines"]:
                     sources.add(prefix)
+        if name == "read_line_range" and result.get("text", "").strip():
+            sources.add(result["evidence_url"])
         if name == "read_cited_evidence" and result.get("source_url") and "data" in result:
             sources.add(result["source_url"])
         if result.get("evidence_url") and "data" in result:

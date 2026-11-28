@@ -149,7 +149,9 @@ def record_read(connection, task_id, turn_id, step, step_id):
         result = json.loads(step["output"])
     except (KeyError, TypeError, ValueError):
         return
-    if not isinstance(result, dict) or not result.get("lines") or not isinstance(result.get("file_id"), str):
+    if not isinstance(result, dict) or not isinstance(result.get("file_id"), str):
+        return
+    if not result.get("lines") and not (result.get("text") and result.get("evidence_url")):
         return
     # Responses store the provider's full output array; match the receipt to its
     # exact call in the preceding response, including for multi-call hosted programs.
@@ -169,12 +171,26 @@ def record_read(connection, task_id, turn_id, step, step_id):
     if not isinstance(args, dict):
         return
     name = result["file_id"]
-    if call.get("name") == "read_file" and args.get("file_id") == name:
+    tool = call.get("name")
+    if tool == "read_line_range" and result.get("text"):
+        # Resolve immutable source identity the same way as a numbered-line read.
+        source = args.get("source")
+        if type(source) is int:
+            tool, args = "read_prior_artifact", {"reference_id": source}
+        elif isinstance(source, dict) and source.get("upload") == name:
+            tool, args = "read_file", {"file_id": name}
+        elif isinstance(source, dict) and source.get("artifact") == name:
+            tool, args = "read_saved_artifact", {"name": name}
+        else:
+            return
+    elif not result.get("lines"):
+        return
+    if tool == "read_file" and args.get("file_id") == name:
         target = connection.execute("SELECT task_id, name, 0 FROM uploads WHERE task_id=? AND name=?", (task_id, name)).fetchone()
-    elif call.get("name") == "read_prior_artifact" and type(args.get("reference_id")) is int:
+    elif tool == "read_prior_artifact" and type(args.get("reference_id")) is int:
         target = connection.execute("""SELECT source_task_id, name, COALESCE(revision, 0) FROM prior_artifacts
             WHERE task_id=? AND reference_id=? AND name=?""", (task_id, args["reference_id"], name)).fetchone()
-    elif call.get("name") == "read_cited_evidence":
+    elif tool == "read_cited_evidence":
         requested = args.get("source_url")
         if not isinstance(requested, str) or requested.partition("#")[0].partition("?page=")[0] != result.get("source_url"):
             return
@@ -188,7 +204,7 @@ def record_read(connection, task_id, turn_id, step, step_id):
         else:
             target = connection.execute("SELECT task_id, name, revision FROM artifact_revisions WHERE task_id=? AND name=? AND revision=?",
                                         (source_task, source_name, source_revision)).fetchone()
-    elif call.get("name") == "read_saved_artifact" and args.get("name") == name:
+    elif tool == "read_saved_artifact" and args.get("name") == name:
         target = connection.execute("""SELECT ?, name, revision FROM turn_artifacts
             WHERE turn_id=? AND name=? AND revision=?""", (task_id, turn_id, name, result.get("revision"))).fetchone()
     else:
