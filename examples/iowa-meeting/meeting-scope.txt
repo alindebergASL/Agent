@@ -1,0 +1,5 @@
+Practice meeting scenario. These details are fictional.
+Audience: campus IT and a research support lead. The meeting lasts 30 minutes.
+Decision: can the team pilot a staff FAQ about how a researcher requests access to clinical research data?
+Pilot input: public university service pages only. Staff already have access to the university ChatGPT Edu workspace.
+The research support lead will verify every access instruction before staff circulate the FAQ.

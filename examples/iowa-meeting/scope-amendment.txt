@@ -1,0 +1,4 @@
+Practice meeting amendment. This changes the proposed inputs only.
+The audience, 30-minute slot, FAQ objective and reviewer remain the same.
+The sponsor still wants to use the university ChatGPT Edu workspace.
+The sponsor now wants identifiable patient-record excerpts entered into that workspace to generate worked examples. No records are included here.
